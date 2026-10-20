@@ -1,0 +1,250 @@
+"""api：api-contract.md 的全部 REST 端点与两个 WebSocket。"""
+from __future__ import annotations
+
+import asyncio
+import io
+import logging
+import struct
+from pathlib import Path
+from typing import TYPE_CHECKING, AsyncIterator
+
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response, StreamingResponse
+from PIL import Image
+from pydantic import BaseModel
+
+from .mock_cam import AUDIO_RATE
+
+if TYPE_CHECKING:
+    from .main import Services
+
+log = logging.getLogger(__name__)
+
+router = APIRouter()
+
+LIVE_SIZE = 480
+LIVE_FPS = 10
+CLIP_SIZE = 320
+CLIP_FPS = 10
+CLIP_AUDIO_CHUNK_S = 0.2
+
+
+def _svc(request: Request) -> "Services":
+    return request.app.state.services
+
+
+# ---- REST ----
+
+@router.get("/api/cats")
+async def list_cats(request: Request) -> list[dict]:
+    cats = _svc(request).storage.list_cats()
+    return [{"id": c["id"], "name": c["name"], "avatar_url": c["avatar_url"]} for c in cats]
+
+
+@router.get("/api/cats/{cat_id}/avatar")
+async def cat_avatar(request: Request, cat_id: str) -> Response:
+    path = _svc(request).storage.cat_avatar_path(cat_id)
+    if not path or not Path(path).exists():
+        raise HTTPException(status_code=404, detail="avatar not found")
+    img = Image.open(path).convert("RGB").resize((192, 192))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+
+@router.get("/api/today")
+async def today(request: Request) -> dict:
+    return _svc(request).storage.today_summary()
+
+
+@router.get("/api/clips")
+async def clips(request: Request, cat_id: str | None = None, date: str | None = None) -> list[dict]:
+    return _svc(request).storage.list_clips(cat_id=cat_id, date=date)
+
+
+class CorrectBody(BaseModel):
+    cat_id: str
+
+
+@router.post("/api/events/{event_id}/correct")
+async def correct_event(request: Request, event_id: int, body: CorrectBody) -> dict:
+    services = _svc(request)
+    event = services.storage.correct_event(event_id, body.cat_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event or cat not found")
+    log.info("event %d corrected to cat=%s", event_id, body.cat_id)
+    await services.broadcast_count_updated()
+    return event
+
+
+@router.get("/api/health")
+async def health(request: Request) -> dict:
+    services = _svc(request)
+    s = services.settings
+    return {
+        "ok": True,
+        "cam_connected": services.ingest.cam_connected,
+        "gate_model": s.gate_model_name,
+        "id_model": s.id_model_name,
+    }
+
+
+def _resize_jpeg(jpeg: bytes, size: int, quality: int = 70) -> bytes:
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB").resize((size, size))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+@router.get("/api/live")
+async def live_video(request: Request) -> StreamingResponse:
+    """MJPEG 流：环形缓冲最新帧缩放到 480×480，~10fps。"""
+    services = _svc(request)
+
+    async def gen() -> AsyncIterator[bytes]:
+        last_ts = 0.0
+        while True:
+            frame = services.ring.latest_frame()
+            if frame and frame.ts > last_ts:
+                last_ts = frame.ts
+                jpeg = await asyncio.to_thread(_resize_jpeg, frame.jpeg, LIVE_SIZE)
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+            await asyncio.sleep(1.0 / LIVE_FPS)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.get("/api/live_audio")
+async def live_audio(request: Request) -> StreamingResponse:
+    """裸 PCM 流：16kHz 16bit 单声道小端，原样转发。"""
+    services = _svc(request)
+
+    async def gen() -> AsyncIterator[bytes]:
+        q = services.ring.subscribe_audio()
+        try:
+            while True:
+                yield await q.get()
+        finally:
+            services.ring.unsubscribe_audio(q)
+
+    return StreamingResponse(gen(), media_type="application/octet-stream")
+
+
+# ---- /ws/events ----
+
+@router.websocket("/ws/events")
+async def ws_events(ws: WebSocket) -> None:
+    services: "Services" = ws.app.state.services
+    await ws.accept()
+    services.bus.connect(ws)
+    try:
+        summary = services.storage.today_summary()
+        await ws.send_json(
+            {"type": "hello", "counts": summary["counts"], "date": summary["date"]}
+        )
+        while True:
+            await ws.receive_text()  # 保持连接；客户端无需上行
+    except WebSocketDisconnect:
+        pass
+    finally:
+        services.bus.disconnect(ws)
+
+
+# ---- /ws/clip/{event_id} ----
+
+# 二进制帧格式：[1B type][4B uint32 LE 时间戳 ms][4B uint32 LE 长度][payload]
+def pack_frame(frame_type: int, ts_ms: int, payload: bytes) -> bytes:
+    return struct.pack("<BII", frame_type, ts_ms, len(payload)) + payload
+
+
+async def _iter_mjpeg(pipe: asyncio.StreamReader) -> AsyncIterator[bytes]:
+    """从 ffmpeg image2pipe(mjpeg) 输出按 SOI/EOI 切帧。"""
+    buf = b""
+    while chunk := await pipe.read(65536):
+        buf += chunk
+        while True:
+            soi = buf.find(b"\xff\xd8")
+            if soi < 0:
+                buf = buf[-2:]
+                break
+            eoi = buf.find(b"\xff\xd9", soi + 2)
+            if eoi < 0:
+                buf = buf[soi:]
+                break
+            yield buf[soi : eoi + 2]
+            buf = buf[eoi + 2 :]
+
+
+async def _iter_pcm(pipe: asyncio.StreamReader, chunk_bytes: int) -> AsyncIterator[bytes]:
+    while chunk := await pipe.read(chunk_bytes):
+        yield chunk
+
+
+class _IndexedFrames:
+    """给流式 payload 配上按序号递增的相对时间戳（ms）。"""
+
+    def __init__(self, it: AsyncIterator[bytes], step_ms: int) -> None:
+        self._it = it
+        self._step_ms = step_ms
+        self._idx: int | None = 0
+
+    async def next(self) -> tuple[int, bytes] | None:
+        if self._idx is None:
+            return None
+        payload = await anext(self._it, None)
+        if payload is None:
+            self._idx = None
+            return None
+        ts = self._idx * self._step_ms
+        self._idx += 1
+        return ts, payload
+
+
+@router.websocket("/ws/clip/{event_id}")
+async def ws_clip(ws: WebSocket, event_id: int) -> None:
+    services: "Services" = ws.app.state.services
+    await ws.accept()
+    event = services.storage.get_event(event_id)
+    clip = event["clip_path"] if event else None
+    clip_path = (services.settings.data_dir.parent / clip) if clip else None
+    if clip_path is None or not Path(clip_path).exists():
+        await ws.send_json({"type": "clip_end"})
+        await ws.close()
+        return
+
+    video_proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-i", str(clip_path),
+        "-vf", f"scale={CLIP_SIZE}:{CLIP_SIZE},fps={CLIP_FPS}",
+        "-f", "image2pipe", "-vcodec", "mjpeg", "-",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    audio_proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-i", str(clip_path), "-vn",
+        "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(AUDIO_RATE), "-ac", "1", "-",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    assert video_proc.stdout is not None and audio_proc.stdout is not None
+
+    chunk_bytes = int(AUDIO_RATE * CLIP_AUDIO_CHUNK_S) * 2
+    video_src = _IndexedFrames(_iter_mjpeg(video_proc.stdout), 1000 // CLIP_FPS)
+    audio_src = _IndexedFrames(
+        _iter_pcm(audio_proc.stdout, chunk_bytes), int(CLIP_AUDIO_CHUNK_S * 1000)
+    )
+
+    try:
+        pending_v = await video_src.next()
+        pending_a = await audio_src.next()
+        while pending_v is not None or pending_a is not None:
+            if pending_a is None or (pending_v is not None and pending_v[0] <= pending_a[0]):
+                await ws.send_bytes(pack_frame(0x01, pending_v[0], pending_v[1]))
+                pending_v = await video_src.next()
+            else:
+                await ws.send_bytes(pack_frame(0x02, pending_a[0], pending_a[1]))
+                pending_a = await audio_src.next()
+    finally:
+        for p in (video_proc, audio_proc):
+            if p.returncode is None:
+                p.kill()
+            await p.wait()
+        await asyncio.sleep(0)  # 让管道 EOF 回调在本事件循环内完成，避免 GC 警告
+    await ws.send_json({"type": "clip_end"})
