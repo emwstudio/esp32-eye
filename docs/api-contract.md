@@ -49,8 +49,10 @@
 
 - `hello`：连接建立时立即下发（当前计数快照）。
 - `drinking_started`：门控判定瞬间即推，不等待身份确认。
-- `cat_confirmed` 可能在 `drinking_started` 后几秒到十几秒到达。
-- 同一事件在 `cat_confirmed` 前，计数按"未确认"处理：桌面屏收到 `drinking_started` 后播放提示音，但**不加计数**；等 `cat_confirmed` 到达才对对应猫 +1（避免误报虚增）。若收到 `event_discarded` 则撤销"确认中"提示。
+- `cat_confirmed`：仅当身份确认为具体某只猫时下发（`cat_id` 必为非空字符串），可能在 `drinking_started` 后几秒到十几秒到达。
+- `cat_unknown`：`{ "type": "cat_unknown", "event_id": 123 }` —— 身份确认完成但置信度不足，事件保留但不归属任何猫；桌面屏把"确认中"横幅切换为"未识别是哪家喵"样式，不加计数。
+- `event_discarded`：事件被否决（如身份确认模型判定"并非在喝水"的误报）；桌面屏撤销"确认中"横幅，不加计数。
+- 计数只在收到 `cat_confirmed`（或人工纠正后的 `count_updated`）时才 +1，避免误报虚增。
 
 ## WebSocket：片段回放 `/ws/clip/{event_id}`
 
