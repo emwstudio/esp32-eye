@@ -20,7 +20,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent  # 仓库根（server/tools/ 的上两级）
 CATS_DIR = ROOT / "assets" / "cats"
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 

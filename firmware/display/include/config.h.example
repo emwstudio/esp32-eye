@@ -1,0 +1,12 @@
+#pragma once
+
+// 复制本文件为 include/config.h 并填写实际值（config.h 已被 .gitignore 忽略）
+
+#define WIFI_SSID "your-wifi-ssid"
+#define WIFI_PASSWORD "your-wifi-password"
+
+// Mac 服务端地址，见 docs/api-contract.md
+#define SERVER_BASE "http://192.168.1.100:8000"
+
+// NTP 服务器（可选覆盖）
+#define NTP_SERVER "pool.ntp.org"

@@ -1,0 +1,5 @@
+# esp32-eye display firmware
+
+.pio/
+.vscode/
+include/config.h
