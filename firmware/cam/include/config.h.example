@@ -1,0 +1,7 @@
+#pragma once
+
+// Copy this file to include/config.h and fill in your credentials.
+// include/config.h is git-ignored; never commit real credentials.
+
+#define WIFI_SSID     "your-ssid"
+#define WIFI_PASSWORD "your-password"
