@@ -9,6 +9,9 @@
 static TaskHandle_t video_task = NULL, audio_task = NULL;
 static volatile bool live_running = false;
 static JPEGDEC jpg;
+// 活动流指针，供 live_stop 从外部 stop() 唤醒阻塞读
+static WiFiClient *live_video_stream = NULL;
+static WiFiClient *live_audio_stream = NULL;
 
 static int live_jpeg_draw(JPEGDRAW *d) {
   uint16_t *dst = (uint16_t *)d->pUser;
@@ -87,11 +90,13 @@ static void live_video_fn(void *) {
       continue;
     }
     WiFiClient *s = http.getStreamPtr();
+    live_video_stream = s;
     while (live_running && http.connected()) {
       size_t n = read_mjpeg_frame(s, jpeg, 400 * 1024);
       if (n == 0) break;
       decode_live(jpeg, n);
     }
+    live_video_stream = NULL;
     http.end();
     if (live_running) vTaskDelay(pdMS_TO_TICKS(2000));  // 断流重连
   }
@@ -113,6 +118,7 @@ static void live_audio_fn(void *) {
       continue;
     }
     WiFiClient *s = http.getStreamPtr();
+    live_audio_stream = s;
     while (live_running && http.connected()) {
       size_t avail = s->available();
       if (avail) {
@@ -128,6 +134,7 @@ static void live_audio_fn(void *) {
         vTaskDelay(pdMS_TO_TICKS(2));
       }
     }
+    live_audio_stream = NULL;
     http.end();
     if (live_running) vTaskDelay(pdMS_TO_TICKS(2000));
   }
@@ -147,9 +154,12 @@ void live_start() {
 void live_stop() {
   if (!video_task && !audio_task) return;
   live_running = false;
+  // 先断流唤醒阻塞中的 read，让两个任务自行退出，再考虑强杀
+  if (live_video_stream) live_video_stream->stop();
+  if (live_audio_stream) live_audio_stream->stop();
   uint32_t t0 = millis();
-  while ((video_task || audio_task) && millis() - t0 < 3000) vTaskDelay(pdMS_TO_TICKS(50));
-  if (video_task) {
+  while ((video_task || audio_task) && millis() - t0 < 1500) vTaskDelay(pdMS_TO_TICKS(50));
+  if (video_task) {  // 最后手段
     vTaskDelete(video_task);
     video_task = NULL;
   }
@@ -157,5 +167,7 @@ void live_stop() {
     vTaskDelete(audio_task);
     audio_task = NULL;
   }
+  live_video_stream = NULL;
+  live_audio_stream = NULL;
   audio_stream_end();
 }

@@ -14,6 +14,7 @@ enum CmdType {
   CMD_REFRESH_HOME,
   CMD_DRINKING_STARTED,
   CMD_CAT_CONFIRMED,
+  CMD_CAT_UNKNOWN,
   CMD_EVENT_DISCARDED,
   CMD_OFFLINE,
   CMD_PLAYER_END,
@@ -39,6 +40,7 @@ void ui_cmd_cat_confirmed(int id, const String &cat) {
   strncpy(c.cat_id, cat.c_str(), sizeof(c.cat_id) - 1);
   post(c);
 }
+void ui_cmd_cat_unknown(int id) { Cmd c{CMD_CAT_UNKNOWN}; c.event_id = id; post(c); }
 void ui_cmd_event_discarded(int id) { Cmd c{CMD_EVENT_DISCARDED}; c.event_id = id; post(c); }
 void ui_cmd_set_offline(bool off, const char *reason) {
   Cmd c{CMD_OFFLINE};
@@ -122,11 +124,30 @@ static void banner_hide() {
   lv_anim_start(&a);
 }
 
+static void banner_auto_hide(uint32_t ms) {
+  lv_timer_t *t = lv_timer_create([](lv_timer_t *tm) {
+    banner_hide();
+    lv_timer_del(tm);
+  }, ms, NULL);
+  lv_timer_set_repeat_count(t, 1);
+}
+
 static void banner_set_pending() {
   lv_obj_clear_flag(banner_spinner, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(banner_arc, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(banner_img, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_border_color(banner, lv_color_hex(0x3fb27f), 0);
   banner_show("有猫在喝水…");
+}
+
+// cat_unknown：确认完成但未认出是哪只猫，几秒后自动消失，不加计数
+static void banner_set_unknown() {
+  lv_obj_add_flag(banner_spinner, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(banner_arc, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(banner_img, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_border_color(banner, lv_color_hex(0xd9a54f), 0);
+  banner_show("有猫在喝水，但没认出是哪只");
+  banner_auto_hide(5000);
 }
 
 static void banner_set_confirmed(const String &cat_id) {
@@ -137,6 +158,7 @@ static void banner_set_confirmed(const String &cat_id) {
   lv_label_set_text(banner_lbl, buf);
   lv_obj_add_flag(banner_spinner, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(banner_arc, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_border_color(banner, lv_color_hex(0x3fb27f), 0);
   void *dsc = avatar_img_dsc(cat_id);
   if (dsc) {
     lv_img_set_src(banner_img, dsc);
@@ -155,11 +177,7 @@ static void banner_set_confirmed(const String &cat_id) {
   }
   banner_show(buf);
   // 8 秒后自动收起
-  lv_timer_t *t = lv_timer_create([](lv_timer_t *tm) {
-    banner_hide();
-    lv_timer_del(tm);
-  }, 8000, NULL);
-  lv_timer_set_repeat_count(t, 1);
+  banner_auto_hide(8000);
 }
 
 // ---------- 主页 ----------
@@ -627,6 +645,11 @@ void ui_process() {
         lv_lock();
         banner_set_confirmed(c.cat_id);
         if (lv_scr_act() == scr_home) refresh_home_grid();
+        lv_unlock();
+        break;
+      case CMD_CAT_UNKNOWN:
+        lv_lock();
+        banner_set_unknown();
         lv_unlock();
         break;
       case CMD_EVENT_DISCARDED:

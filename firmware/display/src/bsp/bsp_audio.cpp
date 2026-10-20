@@ -28,6 +28,9 @@ static volatile uint64_t samples_out = 0;
 static volatile uint64_t samples_in = 0;
 static volatile bool started = false;   // 抖动缓冲已启动
 static TaskHandle_t writer_task = NULL;
+// 保护环形缓冲：writer 的 Receive 与 begin/end 的 Reset、生产者的 Send 互斥，
+// 保证 xStreamBufferReset 不会发生在 writer 阻塞于 Receive 期间
+static SemaphoreHandle_t ring_mutex = NULL;
 
 static const char *TAG = "audio";
 
@@ -87,7 +90,10 @@ static void writer_fn(void *) {
     }
     size_t got = 0;
     if (can_play && started) {
+      // 50ms 短超时轮询，持锁期间不会被 Reset（见 audio_stream_begin/end）
+      xSemaphoreTake(ring_mutex, portMAX_DELAY);
       got = xStreamBufferReceive(ring, mono, CHUNK * 2, pdMS_TO_TICKS(50));
+      xSemaphoreGive(ring_mutex);
       got &= ~((size_t)1);
     } else {
       vTaskDelay(pdMS_TO_TICKS(10));
@@ -111,6 +117,7 @@ static void writer_fn(void *) {
 }
 
 bool audio_init() {
+  ring_mutex = xSemaphoreCreateMutex();
   ring_storage = (uint8_t *)heap_caps_malloc(RING_SIZE, MALLOC_CAP_SPIRAM);
   if (!ring_storage) ring_storage = (uint8_t *)malloc(RING_SIZE);
   ring = xStreamBufferCreateStatic(RING_SIZE, RING_TRIGGER, ring_storage, &ring_struct);
@@ -136,24 +143,30 @@ uint32_t audio_buffered_ms() {
 bool audio_stream_active() { return stream_active; }
 
 void audio_stream_begin() {
+  xSemaphoreTake(ring_mutex, portMAX_DELAY);
   xStreamBufferReset(ring);
   samples_in = samples_out = 0;
   started = false;
   stream_paused = false;
   stream_active = true;
+  xSemaphoreGive(ring_mutex);
 }
 
 void audio_stream_end() {
+  xSemaphoreTake(ring_mutex, portMAX_DELAY);
   stream_active = false;
   xStreamBufferReset(ring);
   samples_in = samples_out = 0;
   started = false;
+  xSemaphoreGive(ring_mutex);
 }
 
 void audio_stream_set_paused(bool paused) { stream_paused = paused; }
 
 size_t audio_stream_write(const uint8_t *pcm, size_t len, uint32_t timeout_ms) {
+  xSemaphoreTake(ring_mutex, portMAX_DELAY);
   size_t sent = xStreamBufferSend(ring, pcm, len, pdMS_TO_TICKS(timeout_ms));
+  xSemaphoreGive(ring_mutex);
   samples_in += sent / 2;
   return sent;
 }

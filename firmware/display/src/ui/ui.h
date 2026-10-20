@@ -13,6 +13,7 @@ void ui_process();
 void ui_cmd_refresh_home();                       // 猫列表/计数变化
 void ui_cmd_drinking_started(int event_id);
 void ui_cmd_cat_confirmed(int event_id, const String &cat_id);
+void ui_cmd_cat_unknown(int event_id);
 void ui_cmd_event_discarded(int event_id);
 void ui_cmd_set_offline(bool offline, const char *reason);
 void ui_cmd_player_end();

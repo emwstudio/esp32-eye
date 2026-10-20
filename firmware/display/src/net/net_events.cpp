@@ -32,11 +32,21 @@ static void handle_message(const String &payload) {
     ui_cmd_drinking_started(id);  // 不加计数，等 cat_confirmed（契约 §WS 事件）
   } else if (type == "cat_confirmed") {
     String cat = doc["cat_id"].as<String>();
+    // 契约保证 cat_id 非空；防御性忽略空值/"null"
+    if (cat.length() == 0 || cat == "null") return;
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     g_state.pending_cat_id = cat;
     g_state.pending_event_id = -1;
     xSemaphoreGive(state_mutex);
     ui_cmd_cat_confirmed(doc["event_id"] | -1, cat);
+  } else if (type == "cat_unknown") {
+    // 身份确认完成但未认出是哪只猫：撤销确认中横幅，换"未识别"提示，不加计数
+    int id = doc["event_id"] | -1;
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    g_state.pending_event_id = -1;
+    g_state.pending_cat_id = "";
+    xSemaphoreGive(state_mutex);
+    ui_cmd_cat_unknown(id);
   } else if (type == "event_discarded") {
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     g_state.pending_event_id = -1;
