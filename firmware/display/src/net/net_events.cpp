@@ -1,4 +1,5 @@
 #include "net_events.h"
+#include "rlog.h"
 #include "net_rest.h"
 #include "state.h"
 #include "ui/ui.h"
@@ -63,7 +64,7 @@ static void events_fn(void *) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
-    Serial.printf("[WS] connecting %s\n", url.c_str());
+    rlogf("[WS] connecting %s", url.c_str());
 
     client.onMessage([](WebsocketsMessage msg) {
       if (msg.isText()) handle_message(msg.data());
@@ -105,5 +106,6 @@ static void events_fn(void *) {
 void events_start() {
   if (events_task) return;
   running = true;
-  xTaskCreatePinnedToCore(events_fn, "ws_events", 8192, NULL, 4, &events_task, 0);
+  BaseType_t r = xTaskCreatePinnedToCore(events_fn, "ws_events", 6144, NULL, 4, &events_task, 0);
+  rlogf("[WS] task create r=%ld heap=%u", (long)r, (unsigned)xPortGetFreeHeapSize());
 }

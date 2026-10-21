@@ -9,10 +9,14 @@ PlatformIO + Arduino core 3.2.0（pioarduino espressif32@54.03.20，ESP-IDF 5.4�
 
 - WiFi STA（凭证在 `include/config.h`，不入库）
 - mDNS：`catcam.local`；NTP 对时（pool.ntp.org），音视频帧共用 epoch 微秒时间戳
-- HTTP（80 端口，esp_http_server，多连接不互堵）：
-  - `GET /stream` — MJPEG 流（`multipart/x-mixed-replace`），SVGA 800×600 JPEG，约 12fps
-  - `GET /capture` — 单帧 JPEG
-  - `GET /healthz` — JSON（uptime / RSSI / NTP 同步状态 / 堆内存 / 音频客户端数）
+- HTTP（80 端口，esp_http_server + 异步移交：/stream 挂到每连接独立任务，不阻塞 httpd 主任务）：
+  - `GET /stream` — MJPEG 流（`multipart/x-mixed-replace`），SVGA 800×600 JPEG；实测单流 13.4fps，
+    相机采集原始速率 ~21.7fps（采集任务独立，最新帧进 PSRAM 共享槽，发送零持锁、每帧单次整块写）
+  - `GET /capture` — 最新帧 JPEG（无需等待抓帧）
+  - `GET /healthz` — JSON（uptime / RSSI / NTP / 堆内存 / 音频客户端数 / stream_clients /
+    stream_frames_sent / stream_errors / last_frame_age_ms / cam_fps / cam_fail_streak / cam_restarts）
+- 流会话管理：最多 2 路并发，第 3 路顶掉最旧会话；httpd 发送超时 2s，死客户端立即清理；
+  2s 无新帧判定相机异常断开会话；采集看门狗：fb_get 连败 30 次重初始化相机，3 次失败 esp_restart()
 - 音频：ES7210 双麦 ADC → I2S 16kHz/16bit 立体声采集，L/R 混成单声道；
   `ws://catcam.local:81/audio` 向每个客户端推送二进制帧：
   `[8B uint64 LE 时间戳 µs][640B PCM = 20ms]`；无客户端时自动暂停 I2S 采集省电
@@ -51,4 +55,4 @@ pio run -t upload && pio device monitor        # 烧录 + 串口日志
   其他路径的 WS 连接会被立即断开
 - WiFi 连接失败仅串口诊断（启动时扫描全网 SSID/RSSI/信道、打印断开 reason 码）并后台重试，
   未实现 AP 配网模式（后续迭代）；国家码已设为 CN（1-13 信道）
-- `/stream` 目标帧率 12fps，实际取决于链路；多客户端同时拉流时共享同一 12fps 抓取节奏
+- `/stream` 实测单流 13.4fps（共享链路时 ~10fps）；多客户端共享同一份采集帧，帧率受 WiFi 链路限制

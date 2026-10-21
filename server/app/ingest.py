@@ -110,7 +110,9 @@ class CamIngest:
 
     async def _pull_mjpeg(self, url: str) -> None:
         buf = b""
-        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+        # 读超时 10s：CAM 断电重启时 TCP 是半开状态，无读超时会把连接挂死一辈子
+        timeout = httpx.Timeout(None, read=10.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             async with client.stream("GET", url) as resp:
                 resp.raise_for_status()
                 self.video_connected = True

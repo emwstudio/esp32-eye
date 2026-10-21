@@ -11,6 +11,8 @@
 #include "ui/ui.h"
 #include "net/net_rest.h"
 #include "net/net_events.h"
+#include "net/rlog.h"
+#include "net/live.h"
 
 // 首屏数据加载（工作线程，避免阻塞 LVGL）
 static void bootstrap_fn(void *) {
@@ -33,7 +35,7 @@ static void bootstrap_fn(void *) {
     vTaskDelete(NULL);
     return;
   }
-  Serial.printf("[BOOT] WiFi ok, ip=%s\n", WiFi.localIP().toString().c_str());
+  rlogf("[BOOT] WiFi ok ip=%s", WiFi.localIP().toString().c_str());
 
   // 启动初期网络协议栈可能还没完全就绪，健康检查重试 3 次
   bool health_ok = false;
@@ -49,12 +51,17 @@ static void bootstrap_fn(void *) {
   }
   Serial.println("[BOOT] 服务器健康检查通过");
 
+  rlogf("[BOOT] heap before cats: %u", (unsigned)xPortGetFreeHeapSize());
   bool cats_ok = rest_fetch_cats();
-  Serial.printf("[BOOT] 猫档案拉取 %s\n", cats_ok ? "成功" : "失败");
+  rlogf("[BOOT] 猫档案拉取 %s, heap after: %u", cats_ok ? "成功" : "失败", (unsigned)xPortGetFreeHeapSize());
   rest_fetch_today();
   ui_cmd_refresh_home();
   Serial.println("[BOOT] 启动事件监听…");
   events_start();
+  if (cats_ok) {
+    Serial.println("[BOOT] 直播自启动");
+    live_start();  // 直播常开（live_start 内部先 live_stop）
+  }
   Serial.println("[BOOT] bootstrap 完成");
   vTaskDelete(NULL);
 }
@@ -77,6 +84,8 @@ static void health_fn(void *) {
       rest_fetch_today();
       ui_cmd_set_offline(false, NULL);
       ui_cmd_refresh_home();
+      live_start();  // 离线恢复：重启直播（内部先 live_stop）
+      rlogf("[BOOT] 离线恢复，直播重启");
     }
   }
 }
@@ -87,6 +96,7 @@ void setup() {
   Serial.println("[BOOT] esp32-eye display node");
 
   state_init();
+  rlog_init();
 
   if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
     Serial.println("[BOOT] LittleFS mount failed");
@@ -126,5 +136,5 @@ void setup() {
 void loop() {
   ui_process();
   bsp_lvgl_task();
-  delay(5);
+  delay(1);  // lv_timer_handler 节奏：直播帧渲染密集，5ms 会造成帧瓶颈
 }

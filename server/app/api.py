@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from .mock_cam import AUDIO_RATE
@@ -42,6 +42,16 @@ async def debug_trigger(request: Request, cat_id: str | None = None) -> dict:
     return {"event_id": event_id, "cat_id": cat_id}
 
 
+@router.post("/api/debug/log")
+async def debug_log(request: Request) -> dict:
+    """桌面屏远程日志接收（text/plain，每行一条）。"""
+    body = await request.body()
+    for line in body.decode("utf-8", "replace").splitlines():
+        if line.strip():
+            log.info("[display] %s", line)
+    return {"ok": True}
+
+
 @router.get("/api/cats")
 async def list_cats(request: Request) -> list[dict]:
     cats = _svc(request).storage.list_cats()
@@ -53,7 +63,7 @@ async def cat_avatar(request: Request, cat_id: str) -> Response:
     path = _svc(request).storage.cat_avatar_path(cat_id)
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="avatar not found")
-    img = Image.open(path).convert("RGB")
+    img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")  # iPhone 照片带 EXIF 方向，必须转正再裁
     w, h = img.size
     side = min(w, h)
     img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2)).resize((192, 192))
@@ -109,8 +119,11 @@ async def health(request: Request) -> dict:
     }
 
 
-def _resize_jpeg(jpeg: bytes, size: int, quality: int = 70) -> bytes:
-    img = Image.open(io.BytesIO(jpeg)).convert("RGB").resize((size, size))
+def _resize_jpeg(jpeg: bytes, size: int, quality: int = 70) -> bytes | None:
+    try:
+        img = Image.open(io.BytesIO(jpeg)).convert("RGB").resize((size, size))
+    except OSError:
+        return None  # 半截帧容错
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
@@ -128,8 +141,52 @@ async def live_video(request: Request) -> StreamingResponse:
             if frame and frame.ts > last_ts:
                 last_ts = frame.ts
                 jpeg = await asyncio.to_thread(_resize_jpeg, frame.jpeg, LIVE_SIZE)
+                if jpeg is None:
+                    await asyncio.sleep(0.02)
+                    continue
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
             await asyncio.sleep(1.0 / LIVE_FPS)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.get("/api/live_band")
+async def live_video_band(request: Request) -> StreamingResponse:
+    """MJPEG 流（宽屏带）：缩放后中心裁 480×240，~10fps，供桌面屏上半屏。"""
+
+    def band_jpeg(jpeg: bytes, quality: int = 55) -> bytes | None:  # ESP32 软解 JPEG 是瓶颈，质量 55 显著降帧大小
+        try:
+            img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        except OSError:
+            return None  # 环缓冲里偶有重连时的半截帧，跳过即可
+        w, h = img.size
+        img = img.resize((480, int(h * 480 / w)))
+        top = max(0, (img.size[1] - 240) // 2)
+        img = img.crop((0, top, 480, top + 240))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+
+    services = _svc(request)
+
+    # 跨连接共享编码结果：同一源帧只编码一次（实测每连接重复编码 + TCP 慢启动是帧率瓶颈）
+    band_cache: dict[str, object] = {"ts": 0.0, "jpeg": b""}
+
+    async def gen() -> AsyncIterator[bytes]:
+        last_sent_ts = 0.0
+        while True:
+            frame = services.ring.latest_frame()
+            if frame and frame.ts > last_sent_ts:
+                if band_cache["ts"] != frame.ts:
+                    jpeg = await asyncio.to_thread(band_jpeg, frame.jpeg)
+                    if jpeg is None:
+                        await asyncio.sleep(0.02)
+                        continue
+                    band_cache["ts"] = frame.ts
+                    band_cache["jpeg"] = jpeg
+                last_sent_ts = frame.ts
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + band_cache["jpeg"] + b"\r\n"  # type: ignore[operator]
+            await asyncio.sleep(0.02)  # 20ms 轮询源帧，上限 50fps；实际由源产帧率决定
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
