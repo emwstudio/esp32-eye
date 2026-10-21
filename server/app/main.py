@@ -20,6 +20,7 @@ from .ringbuffer import RingBuffer
 from .storage import Storage, local_date_str
 
 log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 
 class EventBus:
