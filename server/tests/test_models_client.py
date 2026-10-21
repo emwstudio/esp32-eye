@@ -23,12 +23,14 @@ def test_build_id_content_inserts_group_separators():
     assert content[0] == {"type": "text", "text": "PROMPT"}
     # 事件帧紧跟 prompt
     assert content[1]["type"] == "image_url" and content[2]["type"] == "image_url"
-    # 每只猫一组：分隔文字块 + 该猫参考图
-    assert content[3] == {"type": "text", "text": "参考照片：buding（cat_id=buding）"}
+    # 每只猫一组：开始标记 + 参考图 + 结束标记
+    assert content[3] == {"type": "text", "text": "参考照片开始：buding"}
     assert content[4]["type"] == "image_url" and content[5]["type"] == "image_url"
-    assert content[6] == {"type": "text", "text": "参考照片：naigai（cat_id=naigai）"}
-    assert content[7]["type"] == "image_url"
-    assert len(content) == 8
+    assert content[6] == {"type": "text", "text": "参考照片结束：buding"}
+    assert content[7] == {"type": "text", "text": "参考照片开始：naigai"}
+    assert content[8]["type"] == "image_url"
+    assert content[9] == {"type": "text", "text": "参考照片结束：naigai"}
+    assert len(content) == 10
 
 
 def test_id_judge_parses_is_drinking_false():
@@ -37,7 +39,7 @@ def test_id_judge_parses_is_drinking_false():
     assert (cat_id, conf, is_drinking) == ("buding", 0.8, False)
     # 消息里含分组文字块
     texts = [c["text"] for c in client.content if c["type"] == "text"]
-    assert any("参考照片：buding（cat_id=buding）" in t for t in texts)
+    assert any("参考照片开始：buding" in t for t in texts)
 
 
 def test_id_judge_defaults_is_drinking_true_when_missing():

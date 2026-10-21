@@ -24,6 +24,23 @@ def jpeg_data_url(data: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(data).decode()
 
 
+def scale_to_jpeg(data: bytes, max_edge: int = 1024, quality: int = 80) -> bytes:
+    """把任意图片压到长边 max_edge 的 JPEG。解码失败时原样返回（容错）。"""
+    from io import BytesIO
+
+    from PIL import Image
+
+    try:
+        img = Image.open(BytesIO(data)).convert("RGB")
+        img.thumbnail((max_edge, max_edge))
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001
+        log.warning("image rescale failed, sending original bytes", exc_info=True)
+        return data
+
+
 @dataclass
 class VisionModelClient:
     base_url: str
@@ -63,7 +80,8 @@ GATE_PROMPT = (
 
 ID_PROMPT_TEMPLATE = (
     "前面若干张是一次猫喝水事件的监控画面，随后是每个候选猫的参考照片"
-    "（每组参考照片前的文字标明其身份）。候选 cat_id 列表：{cat_ids}。"
+    "（每只猫的参考照片由『参考照片开始：名字』与『参考照片结束：名字』包围）。"
+    "候选 cat_id 列表：{cat_ids}。"
     "请先复核监控画面中是否真的有猫正在喝水；若确实在喝水，判断是哪一只。"
     "只输出一个 JSON 对象："
     '{{"cat_id": "候选之一或空字符串", "confidence": 0到1之间的数, '
@@ -82,18 +100,23 @@ async def gate_judge(client: VisionModelClient, jpeg: bytes) -> tuple[bool, floa
 def build_id_content(
     prompt: str, frames: list[bytes], refs: dict[str, list[bytes]]
 ) -> list[dict]:
-    """事件帧在前，随后每只猫一组：分隔文字块 + 该猫的参考图。"""
+    """事件帧在前，随后每只猫一组：开始/结束标记包住该猫的参考图。
+
+    实测发现：只用"组前分隔文字"时，模型会把文字关联到前一组图片，
+    造成整体错位一位（见 tools/id_judge_smoke.py 的循环错位现象）。
+    用开始+结束标记双向包围后分组无歧义。
+    所有图片统一经 scale_to_jpeg 压缩——手机原图直传会触发云端 413。
+    """
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img in frames:
-        content.append({"type": "image_url", "image_url": {"url": jpeg_data_url(img)}})
+        content.append({"type": "image_url", "image_url": {"url": jpeg_data_url(scale_to_jpeg(img))}})
     for cat_id in sorted(refs.keys()):
-        content.append(
-            {"type": "text", "text": f"参考照片：{cat_id}（cat_id={cat_id}）"}
-        )
+        content.append({"type": "text", "text": f"参考照片开始：{cat_id}"})
         for img in refs[cat_id]:
             content.append(
-                {"type": "image_url", "image_url": {"url": jpeg_data_url(img)}}
+                {"type": "image_url", "image_url": {"url": jpeg_data_url(scale_to_jpeg(img))}}
             )
+        content.append({"type": "text", "text": f"参考照片结束：{cat_id}"})
     return content
 
 
