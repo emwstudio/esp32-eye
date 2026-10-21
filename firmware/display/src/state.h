@@ -28,6 +28,7 @@ struct AppState {
   bool wifi_ok = false;
   bool server_ok = false;
   bool ws_ok = false;
+  bool offline_shown = false;  // 离线页是否正在显示（UI 任务写，健康任务读）
   int pending_event_id = -1;   // confirming 中的事件
   String pending_cat_id;       // cat_confirmed 后对应猫
 };

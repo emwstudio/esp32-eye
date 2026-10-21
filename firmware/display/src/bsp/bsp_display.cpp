@@ -72,7 +72,16 @@ bool bsp_display_init() {
 
 void bsp_touch_init() {
   touch.setPins(TP_RST, TP_INT);
-  if (!touch.begin(Wire, CST92XX_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+  // CST9220 上电 boot 需要时间，失败时重试（官方示例前置 delay(1000)，此处再加保险）
+  bool online = false;
+  for (int attempt = 0; attempt < 3 && !online; attempt++) {
+    online = touch.begin(Wire, CST92XX_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+    if (!online) {
+      Serial.printf("[BSP] touch begin attempt %d failed\n", attempt + 1);
+      delay(500);
+    }
+  }
+  if (!online) {
     Serial.println("[BSP] touch not online, UI 将无触摸输入");
     return;
   }
@@ -87,8 +96,9 @@ void bsp_touch_init() {
 static void lvgl_port_init() {
   lv_init();
 
-  // 内部 DMA RAM 双缓冲（SPI DMA 不支持 PSRAM），480*48 行/块
-  const uint32_t buf_pixels = LCD_WIDTH * LCD_HEIGHT / 10;
+  // 内部 DMA RAM 双缓冲（SPI DMA 不支持 PSRAM），480*24 行/块
+  // 注：1/10 屏双缓冲要 92KB 内部 RAM，会挤爆任务栈分配；1/20 双缓冲 46KB 是内存与性能的折中
+  const uint32_t buf_pixels = LCD_WIDTH * LCD_HEIGHT / 20;
   lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
   lv_color_t *buf2 = (lv_color_t *)heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
   if (!buf1 || !buf2) {

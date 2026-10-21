@@ -3,6 +3,8 @@
 // Waveshare ESP32-S3-Touch-AMOLED-2.16 引脚定义
 // 来源: 官方 Arduino 示例 examples/arduino/libraries/Mylibrary/pin_config.h
 
+#define XPOWERS_CHIP_AXP2101  // XPowersLib 需要（官方 pin_config.h 同款）
+
 // CO5300 AMOLED (QSPI)
 #define LCD_SDIO0 4
 #define LCD_SDIO1 5

@@ -22,3 +22,4 @@ size_t audio_stream_write(const uint8_t *pcm, size_t len, uint32_t timeout_ms);
 uint32_t audio_clock_ms();      // 播放时钟（已播放毫秒数）
 uint32_t audio_buffered_ms();   // 当前缓冲中未播放毫秒数
 bool audio_stream_active();
+bool audio_is_available();      // codec 初始化失败时为 false（音频降级）

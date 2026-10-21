@@ -35,6 +35,13 @@ def _svc(request: Request) -> "Services":
 
 # ---- REST ----
 
+@router.post("/api/debug/trigger")
+async def debug_trigger(request: Request, cat_id: str | None = None) -> dict:
+    """调试端点：模拟一次喝水事件消息流（不录像不调模型）。"""
+    event_id = await _svc(request).debug_trigger_event(cat_id)
+    return {"event_id": event_id, "cat_id": cat_id}
+
+
 @router.get("/api/cats")
 async def list_cats(request: Request) -> list[dict]:
     cats = _svc(request).storage.list_cats()

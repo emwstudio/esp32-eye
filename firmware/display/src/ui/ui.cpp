@@ -661,6 +661,7 @@ void ui_process() {
         lv_lock();
         if (c.flag) show_offline(c.text);
         else lv_scr_load(scr_home);
+        g_state.offline_shown = c.flag;
         lv_unlock();
         break;
       case CMD_PLAYER_END:

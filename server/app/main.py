@@ -132,6 +132,26 @@ class Services:
             {"type": "count_updated", "date": summary["date"], "counts": summary["counts"]}
         )
 
+    async def debug_trigger_event(self, cat_id: str | None = None) -> int:
+        """调试用（POST /api/debug/trigger）：模拟一次完整喝水事件消息流。
+
+        不录像、不调模型——只验证事件广播与桌面屏提醒链路。
+        """
+        import time
+
+        ts = time.time()
+        event_id = self._on_event_start(ts)
+        self.storage.finish_event(event_id, ts + 5)
+        await asyncio.sleep(2)
+        cats = self.storage.list_cats()
+        chosen = cat_id or (cats[0]["id"] if cats else None)
+        if chosen:
+            self.storage.update_identity(event_id, chosen, 0.99, "confirmed")
+        else:
+            self.storage.update_identity(event_id, None, None, "unknown")
+        await self._on_identified(event_id)
+        return event_id
+
     def start_background(self) -> None:
         self.ingest.start()
         self.detector.start()

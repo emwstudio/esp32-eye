@@ -28,6 +28,7 @@ static volatile uint64_t samples_out = 0;
 static volatile uint64_t samples_in = 0;
 static volatile bool started = false;   // 抖动缓冲已启动
 static TaskHandle_t writer_task = NULL;
+static bool audio_available = false;    // codec 初始化失败时音频整体降级（不崩溃）
 // 保护环形缓冲：writer 的 Receive 与 begin/end 的 Reset、生产者的 Send 互斥，
 // 保证 xStreamBufferReset 不会发生在 writer 阻塞于 Receive 期间
 static SemaphoreHandle_t ring_mutex = NULL;
@@ -44,7 +45,11 @@ static esp_err_t es8311_codec_init() {
     .mclk_frequency = AUDIO_SAMPLE_RATE * 256,
     .sample_frequency = AUDIO_SAMPLE_RATE,
   };
-  ESP_ERROR_CHECK(es8311_init(es_handle, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16));
+  esp_err_t err = es8311_init(es_handle, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "es8311_init failed: %s", esp_err_to_name(err));
+    return err;
+  }
   ESP_RETURN_ON_ERROR(es8311_sample_frequency_config(es_handle, es_clk.mclk_frequency, es_clk.sample_frequency), TAG, "set freq failed");
   ESP_RETURN_ON_ERROR(es8311_microphone_config(es_handle, false), TAG, "mic cfg failed");
   ESP_RETURN_ON_ERROR(es8311_voice_volume_set(es_handle, VOICE_VOLUME, NULL), TAG, "volume failed");
@@ -65,7 +70,11 @@ static void i2s_bus_init() {
     .tx_desc_auto_clear = true,
     .fixed_mclk = AUDIO_SAMPLE_RATE * 256,
   };
-  ESP_ERROR_CHECK(i2s_driver_install(I2S_PORT, &cfg, 0, NULL));
+  esp_err_t err = i2s_driver_install(I2S_PORT, &cfg, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("[AUDIO] i2s_driver_install failed: %s\n", esp_err_to_name(err));
+    return;
+  }
   i2s_pin_config_t pins = {
     .mck_io_num = I2S_MCLK,
     .bck_io_num = I2S_BCLK,
@@ -73,7 +82,11 @@ static void i2s_bus_init() {
     .data_out_num = I2S_DOUT,
     .data_in_num = I2S_DIN,
   };
-  ESP_ERROR_CHECK(i2s_set_pin(I2S_PORT, &pins));
+  err = i2s_set_pin(I2S_PORT, &pins);
+  if (err != ESP_OK) {
+    Serial.printf("[AUDIO] i2s_set_pin failed: %s\n", esp_err_to_name(err));
+    return;
+  }
   i2s_zero_dma_buffer(I2S_PORT);
 }
 
@@ -128,12 +141,17 @@ bool audio_init() {
 
   i2s_bus_init();
   if (es8311_codec_init() != ESP_OK) {
-    Serial.println("[AUDIO] ES8311 init failed");
+    // 喇叭可能没接 / codec 掉线：音频整体降级，不崩溃
+    Serial.println("[AUDIO] ES8311 init failed, 音频功能降级（提示音/回放无声，UI 正常）");
+    audio_available = false;
     return false;
   }
   xTaskCreatePinnedToCore(writer_fn, "audio_wr", 4096, NULL, 5, &writer_task, 0);
+  audio_available = true;
   return true;
 }
+
+bool audio_is_available() { return audio_available; }
 
 uint32_t audio_clock_ms() { return (uint32_t)(samples_out * 1000 / AUDIO_SAMPLE_RATE); }
 uint32_t audio_buffered_ms() {
@@ -143,6 +161,7 @@ uint32_t audio_buffered_ms() {
 bool audio_stream_active() { return stream_active; }
 
 void audio_stream_begin() {
+  if (!audio_available) return;
   xSemaphoreTake(ring_mutex, portMAX_DELAY);
   xStreamBufferReset(ring);
   samples_in = samples_out = 0;
@@ -153,6 +172,7 @@ void audio_stream_begin() {
 }
 
 void audio_stream_end() {
+  if (!audio_available) return;
   xSemaphoreTake(ring_mutex, portMAX_DELAY);
   stream_active = false;
   xStreamBufferReset(ring);
@@ -164,6 +184,7 @@ void audio_stream_end() {
 void audio_stream_set_paused(bool paused) { stream_paused = paused; }
 
 size_t audio_stream_write(const uint8_t *pcm, size_t len, uint32_t timeout_ms) {
+  if (!audio_available) return len;  // 降级模式：假接收，播放走墙上时钟兜底
   xSemaphoreTake(ring_mutex, portMAX_DELAY);
   size_t sent = xStreamBufferSend(ring, pcm, len, pdMS_TO_TICKS(timeout_ms));
   xSemaphoreGive(ring_mutex);
@@ -173,6 +194,7 @@ size_t audio_stream_write(const uint8_t *pcm, size_t len, uint32_t timeout_ms) {
 
 // 解析 WAV 头并送入环形缓冲（阻塞式，提示音短促可接受）
 void audio_play_alert() {
+  if (!audio_available) return;
   // 定位 data chunk
   const uint8_t *p = alert_wav;
   const uint8_t *end = alert_wav + alert_wav_len;
