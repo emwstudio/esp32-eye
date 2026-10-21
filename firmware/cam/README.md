@@ -35,9 +35,12 @@ pio run -t upload && pio device monitor        # 烧录 + 串口日志
 与板型开源固件 furby-connect-ai 的引脚表**完全一致**，无差异：
 
 - 摄像头 DVP：XCLK=38, SIOD=8, SIOC=7, Y9..Y2=21/39/40/42/46/48/47/45, VSYNC=17, HREF=18, PCLK=41，XCLK 20MHz
-- **OV5640 无软件控制的 PWDN/RESET（均为 -1）**；摄像头供电由 CH32 IO 扩展器（0x24）IO6 拉高使能，
-  因此初始化顺序固定为：`I2C 总线恢复 → Wire.begin(8,7) → CH32 IO6=1 → esp_camera_init()`，
-  之后才能初始化 ES7210（官方示例即此顺序；SCCB 与 I2C 共用 GPIO8/7）。
+- **OV5640 无软件控制的 PWDN/RESET（均为 -1）**；摄像头供电由 CH32 IO 扩展器（0x24）IO6 拉高使能。
+  SCCB 与 I2C 共用 GPIO8/7。**总线共存方案（真机验证）**：esp32-camera 在 IDF≥5.4 下 SCCB 走新
+  i2c_master 驱动（sccb-ng.c），与 Arduino Wire 的 legacy 驱动不能共占 I2C0（否则 ES7210 写报
+  `ESP_ERR_INVALID_STATE`）。因此固件自建 i2c_master 总线（port 0，GPIO8/7，100kHz），摄像头以
+  `pin_sccb_sda=-1, sccb_i2c_port=0` 挂到该总线，CH32/ES7210 也全部走同一新驱动，完全不使用 Wire。
+  初始化顺序：`GPIO 总线恢复（9 个 SCL 脉冲）→ i2cBusInit() → CH32 IO6=1 → esp_camera_init() → ES7210`。
 - I2S：MCLK=10, BCLK=11, LRCK=12, DIN=13（ES7210 → ESP32）, DOUT=14（→ ES8311，本节点未用）
 - ES7210 配置取自官方 `06_esp_sr` 示例：16kHz / 16bit / 标准 I2S（非 TDM，MIC1→L、MIC2→R）、
   MCLK=256Fs=4.096MHz、bias 2.87V、增益 30dB、ADC 数字音量 +40dB
@@ -46,5 +49,6 @@ pio run -t upload && pio device monitor        # 烧录 + 串口日志
 
 - WS 音频在独立端口 81（`WebSockets` 库自建 server），HTTP 在 80；路径固定 `/audio`，
   其他路径的 WS 连接会被立即断开
-- WiFi 连接失败仅串口提示并后台重试，未实现 AP 配网模式（后续迭代）
+- WiFi 连接失败仅串口诊断（启动时扫描全网 SSID/RSSI/信道、打印断开 reason 码）并后台重试，
+  未实现 AP 配网模式（后续迭代）；国家码已设为 CN（1-13 信道）
 - `/stream` 目标帧率 12fps，实际取决于链路；多客户端同时拉流时共享同一 12fps 抓取节奏

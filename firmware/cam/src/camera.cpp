@@ -27,8 +27,12 @@ bool camInit() {
   config.pin_pclk = CAM_PIN_PCLK;
   config.pin_vsync = CAM_PIN_VSYNC;
   config.pin_href = CAM_PIN_HREF;
-  config.pin_sccb_sda = CAM_PIN_SIOD;
-  config.pin_sccb_scl = CAM_PIN_SIOC;
+  // SCCB shares GPIO 8/7 with the control I2C bus, which is an i2c_master
+  // (new driver) bus on port 0 created by i2cBusInit(). Pin -1 tells
+  // esp32-camera to attach to that existing bus instead of owning the port.
+  config.pin_sccb_sda = -1;
+  config.pin_sccb_scl = -1;
+  config.sccb_i2c_port = 0;
   config.pin_pwdn = CAM_PIN_PWDN;
   config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = CAM_XCLK_HZ;

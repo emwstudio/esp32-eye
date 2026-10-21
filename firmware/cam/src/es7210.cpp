@@ -1,9 +1,9 @@
 #include "es7210.h"
 
 #include <Arduino.h>
-#include <Wire.h>
 
 #include "board.h"
+#include "i2c_bus.h"
 
 // ES7210 register addresses (es7210_reg.h from the official demo)
 #define ES7210_RESET_REG00          0x00
@@ -39,12 +39,10 @@
 #define ES7210_MIC34_POWER_REG4C    0x4C
 
 static bool es7210WriteReg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(ES7210_ADDR);
-  Wire.write(reg);
-  Wire.write(val);
-  uint8_t err = Wire.endTransmission(true);
-  if (err) {
-    Serial.printf("ES7210: I2C write reg=0x%02X val=0x%02X failed err=%d\n", reg, val, err);
+  esp_err_t err = i2cBusWrite2(ES7210_ADDR, reg, val);
+  if (err != ESP_OK) {
+    Serial.printf("ES7210: I2C write reg=0x%02X val=0x%02X failed err=%s\n",
+                  reg, val, esp_err_to_name(err));
     return false;
   }
   return true;
