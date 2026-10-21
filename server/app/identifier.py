@@ -1,4 +1,8 @@
-"""identifier：事件结束后调云端 35B 模型确认是哪只猫，失败重试（最多 3 次，退避）。"""
+"""identifier：事件结束后调云端 35B 模型复核喝水并确认是哪只猫，失败重试（最多 3 次，退避）。
+
+三种终态：is_drinking=false → discarded（误报）；置信度不足或认不出 → unknown；
+确认成功 → confirmed。结果经 on_identified 回调交给上层广播。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -17,8 +21,8 @@ from .storage import Storage
 
 log = logging.getLogger(__name__)
 
-# id_fn(frames, refs) -> (cat_id, confidence)；cat_id 为空表示模型无法判断
-IdFn = Callable[[list[bytes], dict[str, list[bytes]]], Awaitable[tuple[str, float]]]
+# id_fn(frames, refs) -> (cat_id, confidence, is_drinking)；cat_id 为空表示模型无法判断
+IdFn = Callable[[list[bytes], dict[str, list[bytes]]], Awaitable[tuple[str, float, bool]]]
 
 MAX_FRAMES = 3
 MAX_ATTEMPTS = 3
@@ -59,6 +63,7 @@ class Identifier:
                 model=settings.id_model_name,
             )
             self._id_fn = lambda frames, refs: id_judge(client, frames, refs)
+        self.backoff_s = BACKOFF_S
 
     async def identify(self, event_id: int, start_ts: float, end_ts: float) -> None:
         event = self.storage.get_event(event_id)
@@ -71,7 +76,7 @@ class Identifier:
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                cat_id, confidence = await self._id_fn(frames, refs)
+                cat_id, confidence, is_drinking = await self._id_fn(frames, refs)
                 break
             except Exception as e:
                 log.warning(
@@ -81,19 +86,23 @@ class Identifier:
                 if attempt == MAX_ATTEMPTS:
                     log.error("event %d stays confirming: id model unreachable", event_id)
                     return
-                await asyncio.sleep(BACKOFF_S * attempt)
+                await asyncio.sleep(self.backoff_s * attempt)
         else:
             return
 
-        if not cat_id or confidence < self.settings.identity_confidence_min:
-            self.storage.update_identity(event_id, cat_id or None, confidence, "unknown")
-            log.info("event %d identity unknown (cat_id=%r conf=%.2f)", event_id, cat_id, confidence)
-        else:
+        if not is_drinking:
+            self.storage.update_identity(event_id, None, confidence, "discarded")
+            log.info("event %d discarded: id model says not drinking (conf=%.2f)",
+                     event_id, confidence)
+        elif cat_id and confidence >= self.settings.identity_confidence_min:
             self.storage.update_identity(event_id, cat_id, confidence, "confirmed")
             log.info("event %d confirmed cat=%s conf=%.2f", event_id, cat_id, confidence)
+        else:
+            self.storage.update_identity(event_id, cat_id or None, confidence, "unknown")
+            log.info("event %d identity unknown (cat_id=%r conf=%.2f)", event_id, cat_id, confidence)
 
-        if self.on_confirmed:
-            self.on_confirmed(event_id)
+        if self.on_identified:
+            self.on_identified(event_id)
 
-    # 由 main 注入：确认完成后广播 cat_confirmed + count_updated
-    on_confirmed: Callable[[int], None] | None = None
+    # 由 main 注入：身份确认出终态后广播（cat_confirmed / cat_unknown / event_discarded）
+    on_identified: Callable[[int], None] | None = None

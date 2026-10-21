@@ -31,12 +31,8 @@ class VisionModelClient:
     model: str
     timeout: float = 60.0
 
-    async def chat_with_images(self, prompt: str, images: list[bytes]) -> str:
-        content: list[dict] = [{"type": "text", "text": prompt}]
-        for img in images:
-            content.append(
-                {"type": "image_url", "image_url": {"url": jpeg_data_url(img)}}
-            )
+    async def chat_content(self, content: list[dict]) -> str:
+        """发送多模态 content（text/image_url 交错）并返回文本。"""
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
@@ -50,6 +46,14 @@ class VisionModelClient:
             data = resp.json()
         return str(data["choices"][0]["message"]["content"])
 
+    async def chat_with_images(self, prompt: str, images: list[bytes]) -> str:
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for img in images:
+            content.append(
+                {"type": "image_url", "image_url": {"url": jpeg_data_url(img)}}
+            )
+        return await self.chat_content(content)
+
 
 GATE_PROMPT = (
     "这是一张猫饮水机旁的监控画面。判断画面中是否有猫正在喝水。"
@@ -59,10 +63,12 @@ GATE_PROMPT = (
 
 ID_PROMPT_TEMPLATE = (
     "前面若干张是一次猫喝水事件的监控画面，随后是每个候选猫的参考照片"
-    "（每组参考照片前的文字标明其 cat_id）。候选 cat_id 列表：{cat_ids}。"
-    "请判断事件中的猫最可能是哪一只，只输出一个 JSON 对象："
-    '{"cat_id": "候选之一", "confidence": 0到1之间的数}。'
-    "若无法判断，confidence 给低分。"
+    "（每组参考照片前的文字标明其身份）。候选 cat_id 列表：{cat_ids}。"
+    "请先复核监控画面中是否真的有猫正在喝水；若确实在喝水，判断是哪一只。"
+    "只输出一个 JSON 对象："
+    '{{"cat_id": "候选之一或空字符串", "confidence": 0到1之间的数, '
+    '"is_drinking": true 或 false}}。'
+    "若并非在喝水，is_drinking=false；若无法判断是哪只猫，confidence 给低分。"
 )
 
 
@@ -73,25 +79,40 @@ async def gate_judge(client: VisionModelClient, jpeg: bytes) -> tuple[bool, floa
     return bool(obj.get("is_drinking")), float(obj.get("confidence", 0.0))
 
 
+def build_id_content(
+    prompt: str, frames: list[bytes], refs: dict[str, list[bytes]]
+) -> list[dict]:
+    """事件帧在前，随后每只猫一组：分隔文字块 + 该猫的参考图。"""
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for img in frames:
+        content.append({"type": "image_url", "image_url": {"url": jpeg_data_url(img)}})
+    for cat_id in sorted(refs.keys()):
+        content.append(
+            {"type": "text", "text": f"参考照片：{cat_id}（cat_id={cat_id}）"}
+        )
+        for img in refs[cat_id]:
+            content.append(
+                {"type": "image_url", "image_url": {"url": jpeg_data_url(img)}}
+            )
+    return content
+
+
 async def id_judge(
     client: VisionModelClient,
     frames: list[bytes],
     refs: dict[str, list[bytes]],
-) -> tuple[str, float]:
-    """身份确认：返回 (cat_id, confidence)。未知时 cat_id 为 ""。"""
+) -> tuple[str, float, bool]:
+    """身份确认 + 喝水复核：返回 (cat_id, confidence, is_drinking)。未知时 cat_id 为 ""。"""
     cat_ids = sorted(refs.keys())
     if not cat_ids:
-        return "", 0.0
+        return "", 0.0, True
     prompt = ID_PROMPT_TEMPLATE.format(cat_ids=", ".join(cat_ids))
-    images: list[bytes] = list(frames)
-    # 参考图跟在事件帧之后；prompt 中说明顺序
-    for cid in cat_ids:
-        images.extend(refs[cid])
-    text = await client.chat_with_images(prompt, images)
+    text = await client.chat_content(build_id_content(prompt, frames, refs))
     obj = extract_json_object(text)
     cat_id = str(obj.get("cat_id", ""))
     confidence = float(obj.get("confidence", 0.0))
+    is_drinking = bool(obj.get("is_drinking", True))
     if cat_id not in refs:
         log.info("id model returned unknown cat_id %r", cat_id)
-        return "", confidence
-    return cat_id, confidence
+        cat_id = ""
+    return cat_id, confidence, is_drinking

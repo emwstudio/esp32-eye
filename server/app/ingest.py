@@ -1,4 +1,9 @@
-"""ingest：后台拉取 CAM 的 MJPEG 视频流与 WS 音频流，断线指数退避重连。"""
+"""ingest：后台拉取 CAM 的 MJPEG 视频流与 WS 音频流，断线指数退避重连。
+
+时间戳策略：音频块在 CAM 端 NTP 已同步时使用设备时间戳（µs → 秒）；
+未同步时回退接收时刻并警告一次。视频帧始终用接收时刻——MJPEG 流不含
+逐帧设备时间戳，且 HTTP 管线缓冲带来的延迟差异是已知余项。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +22,7 @@ log = logging.getLogger(__name__)
 
 BACKOFF_MIN = 1.0
 BACKOFF_MAX = 30.0
+DEVICE_TS_TOLERANCE_S = 60.0  # 设备时间戳与本地时钟偏差超过此值视为 NTP 未同步
 
 
 class CamIngest:
@@ -28,16 +34,31 @@ class CamIngest:
         self.video_connected = False
         self.audio_connected = False
         self._tasks: list[asyncio.Task[None]] = []
+        self._device_ts_warned = False
 
     @property
     def connected(self) -> bool:
         return self.video_connected
 
+    def audio_chunk_ts(self, device_ts_us: int, now: float) -> float:
+        """NTP 已同步（与本地时钟偏差 ≤60s）时用设备时间戳，否则回退接收时刻。"""
+        device_s = device_ts_us / 1e6
+        if abs(now - device_s) <= DEVICE_TS_TOLERANCE_S:
+            return device_s
+        if not self._device_ts_warned:
+            log.warning(
+                "cam device timestamp unsynced (device=%.3f local=%.3f); "
+                "falling back to receive time",
+                device_s, now,
+            )
+            self._device_ts_warned = True
+        return now
+
     def start(self) -> None:
         base = self.settings.cam_base_url.rstrip("/")
         self._tasks = [
             asyncio.create_task(self._video_loop(f"{base}/stream")),
-            asyncio.create_task(self._audio_loop(self._ws_url(base) + "/audio")),
+            asyncio.create_task(self._audio_loop(self.settings.audio_ws_url())),
         ]
 
     async def stop(self) -> None:
@@ -48,14 +69,6 @@ class CamIngest:
                 await t
             except asyncio.CancelledError:
                 pass
-
-    @staticmethod
-    def _ws_url(base: str) -> str:
-        if base.startswith("https://"):
-            return "wss://" + base[len("https://") :]
-        if base.startswith("http://"):
-            return "ws://" + base[len("http://") :]
-        return base
 
     async def _video_loop(self, url: str) -> None:
         backoff = BACKOFF_MIN
@@ -101,6 +114,7 @@ class CamIngest:
             try:
                 async with websockets.connect(url, max_size=None) as ws:
                     self.audio_connected = True
+                    self._device_ts_warned = False  # 每次重连后重新判定 NTP 同步
                     log.info("cam audio stream connected: %s", url)
                     backoff = BACKOFF_MIN
                     async for msg in ws:
@@ -109,9 +123,8 @@ class CamIngest:
                         (device_ts,) = struct.unpack("<Q", msg[:8])
                         pcm = msg[8:]
                         if pcm:
-                            self.ring.add_audio(
-                                AudioChunk(ts=time.time(), pcm=pcm)
-                            )
+                            ts = self.audio_chunk_ts(device_ts, time.time())
+                            self.ring.add_audio(AudioChunk(ts=ts, pcm=pcm))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -136,6 +149,14 @@ class IngestManager:
             return self.mock.connected
         if self.real is not None:
             return self.real.connected
+        return False
+
+    @property
+    def audio_connected(self) -> bool:
+        if self.mock is not None:
+            return self.mock.connected
+        if self.real is not None:
+            return self.real.audio_connected
         return False
 
     def start(self) -> None:

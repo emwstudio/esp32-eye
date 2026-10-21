@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 async def _run_ffmpeg(args: list[str]) -> None:
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", *args,
+        "ffmpeg", "-nostdin", *args,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )

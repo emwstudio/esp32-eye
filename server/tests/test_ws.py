@@ -29,7 +29,7 @@ def test_ws_events_hello_and_event_flow(settings):
         return next(votes, (False, 0.0))
 
     async def id_fn(frames, refs):
-        return "buding", 0.86
+        return "buding", 0.86, True
 
     app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
     with TestClient(app) as client:
@@ -145,3 +145,122 @@ def test_ws_clip_missing_event(settings):
         with client.websocket_connect("/ws/clip/9999") as ws:
             msg = ws.receive_json()
             assert msg == {"type": "clip_end"}
+
+
+def _drive_event(client, services, n_pos=3, n_neg=4):
+    """手动喂帧走完一次事件（触发 + 释放），返回收到的第一条 drinking_started。"""
+    ts = time.time()
+    frames = [flat_jpeg()] + [random_jpeg(i) for i in range(n_pos + n_neg)]
+    for i, jpeg in enumerate(frames):
+        client.portal.call(services.detector.process_frame, jpeg, ts + i * 0.1)
+
+
+def test_ws_event_discarded_flow(settings):
+    votes = iter([(True, 0.9)] * 3 + [(False, 0.1)] * 4)
+
+    async def gate_fn(jpeg: bytes):
+        return next(votes, (False, 0.0))
+
+    async def id_fn(frames, refs):
+        return "buding", 0.95, False  # 35B 复核：并非在喝水
+
+    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
+    with TestClient(app) as client:
+        services = app.state.services
+        client.portal.call(services.detector.stop)
+        with client.websocket_connect("/ws/events") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _drive_event(client, services)
+            started = ws.receive_json()
+            assert started["type"] == "drinking_started"
+            discarded = ws.receive_json()
+            assert discarded["type"] == "event_discarded"
+            assert discarded["event_id"] == started["event_id"]
+            assert discarded["reason"] == "false_positive"
+        event = services.storage.get_event(started["event_id"])
+        assert event["status"] == "discarded"
+        # discarded 不计数
+        assert services.storage.today_summary()["counts"] == {}
+
+
+def test_ws_event_unknown_then_correct(settings, make_cats):
+    make_cats(settings.cats_dir)
+    votes = iter([(True, 0.9)] * 3 + [(False, 0.1)] * 4)
+
+    async def gate_fn(jpeg: bytes):
+        return next(votes, (False, 0.0))
+
+    async def id_fn(frames, refs):
+        return "buding", 0.3, True  # 置信度不足
+
+    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
+    with TestClient(app) as client:
+        services = app.state.services
+        client.portal.call(services.detector.stop)
+        with client.websocket_connect("/ws/events") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            _drive_event(client, services)
+            started = ws.receive_json()
+            event_id = started["event_id"]
+            unknown = ws.receive_json()
+            # cat_unknown：不带 cat_id，不加计数
+            assert unknown == {"type": "cat_unknown", "event_id": event_id}
+            assert services.storage.get_event(event_id)["status"] == "unknown"
+
+            # 人工纠正 unknown 事件 → 广播 cat_confirmed + count_updated
+            r = client.post(f"/api/events/{event_id}/correct", json={"cat_id": "naigai"})
+            assert r.status_code == 200
+            confirmed = ws.receive_json()
+            assert confirmed["type"] == "cat_confirmed"
+            assert confirmed["event_id"] == event_id
+            assert confirmed["cat_id"] == "naigai"
+            count_msg = ws.receive_json()
+            assert count_msg["type"] == "count_updated"
+            assert count_msg["counts"] == {"naigai": 1}
+
+        assert services.storage.get_event(event_id)["status"] == "confirmed"
+
+
+def test_ws_clip_silent_video_gets_silence_audio(settings):
+    """I3：无音轨 MP4 回放时注入等长静音 PCM。"""
+    day = local_date_str()
+    clip_dir = settings.data_dir / "clips" / day
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = clip_dir / "silent.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(clip_file),
+        ],
+        check=True, capture_output=True,
+    )
+
+    app = create_app(settings, gate_fn=None, id_fn=None)
+    with TestClient(app) as client:
+        storage = app.state.services.storage
+        client.portal.call(app.state.services.detector.stop)
+        client.portal.call(app.state.services.ingest.stop)
+        event_id = storage.create_event(time.time() - 2)
+        storage.finish_event(event_id, time.time())
+        storage.set_clip_path(event_id, f"data/clips/{day}/silent.mp4")
+
+        messages = []
+        with client.websocket_connect(f"/ws/clip/{event_id}") as ws:
+            while True:
+                msg = ws.receive()
+                if "text" in msg and msg["text"] is not None:
+                    break
+                messages.append(msg["bytes"])
+
+        parsed = parse_frames(messages)
+        videos = [p for p in parsed if p[0] == 0x01]
+        audios = [p for p in parsed if p[0] == 0x02]
+        assert len(videos) >= 15
+        # 静音块与视频等长：2s / 0.2s ≈ 10 块，内容全零
+        assert len(audios) >= 8
+        for ts_ms, _, payload in [(0, 0, a[2]) for a in audios]:
+            assert payload == b"\x00" * len(payload)
+        a_ts = [a[1] for a in audios]
+        assert a_ts[0] == 0 and a_ts == sorted(a_ts)

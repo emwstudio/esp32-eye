@@ -50,6 +50,7 @@ def test_health(settings):
         body = r.json()
         assert body["ok"] is True
         assert body["cam_connected"] is True  # mock 模式视为已连接
+        assert body["audio_connected"] is True  # 新增字段：音频连接状态
         assert body["gate_model"] == settings.gate_model_name
         assert body["id_model"] == settings.id_model_name
 

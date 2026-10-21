@@ -106,8 +106,11 @@ def main() -> int:
         for truth, photo in tests:
             content: list[dict] = []
             for n in names:
+                # 每组参考图前加分隔文字块，使模型能把图组映射到候选
+                content.append({"type": "text", "text": f"参考照片：{n}（cat_id={n}）"})
                 for r in refs[n]:
                     content.append({"type": "image_url", "image_url": {"url": b64_url(r)}})
+            content.append({"type": "text", "text": "待辨认照片："})
             content.append({"type": "image_url", "image_url": {"url": b64_url(photo)}})
             content.insert(0, {"type": "text", "text": tmpl.format(n=len(names), names="、".join(names))})
             try:

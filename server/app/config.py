@@ -21,6 +21,7 @@ def _get_bool(key: str, default: bool) -> bool:
 @dataclass
 class Settings:
     cam_base_url: str = ""
+    cam_audio_ws_url: str = ""  # 为空时从 cam_base_url 推导 host + :81/audio
     cam_mock: bool = False
 
     gate_model_base_url: str = "http://127.0.0.1:8080/v1"
@@ -50,6 +51,19 @@ class Settings:
     def use_mock_cam(self) -> bool:
         return self.cam_mock or not self.cam_base_url
 
+    def audio_ws_url(self) -> str:
+        """音频 WS 地址：显式配置优先，否则从 cam_base_url 推导 host + :81/audio。"""
+        if self.cam_audio_ws_url:
+            return self.cam_audio_ws_url
+        if not self.cam_base_url:
+            return ""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.cam_base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        host = parsed.hostname or parsed.path
+        return f"{scheme}://{host}:81/audio"
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "app.db"
@@ -63,6 +77,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
     load_dotenv(env_file or SERVER_ROOT / ".env")
     s = Settings()
     s.cam_base_url = os.getenv("CAM_BASE_URL", s.cam_base_url).strip()
+    s.cam_audio_ws_url = os.getenv("CAM_AUDIO_WS_URL", s.cam_audio_ws_url).strip()
     s.cam_mock = _get_bool("CAM_MOCK", s.cam_mock)
     s.gate_model_base_url = os.getenv("GATE_MODEL_BASE_URL", s.gate_model_base_url)
     s.gate_model_name = os.getenv("GATE_MODEL_NAME", s.gate_model_name)

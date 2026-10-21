@@ -73,6 +73,15 @@ async def correct_event(request: Request, event_id: int, body: CorrectBody) -> d
     if event is None:
         raise HTTPException(status_code=404, detail="event or cat not found")
     log.info("event %d corrected to cat=%s", event_id, body.cat_id)
+    # 人工纠正与自动确认同等语义：广播 cat_confirmed（cat_id 必非空）+ count_updated
+    await services.bus.broadcast(
+        {
+            "type": "cat_confirmed",
+            "event_id": event_id,
+            "cat_id": event["cat_id"],
+            "confidence": event["confidence"],
+        }
+    )
     await services.broadcast_count_updated()
     return event
 
@@ -84,6 +93,7 @@ async def health(request: Request) -> dict:
     return {
         "ok": True,
         "cam_connected": services.ingest.cam_connected,
+        "audio_connected": services.ingest.audio_connected,
         "gate_model": s.gate_model_name,
         "id_model": s.id_model_name,
     }
@@ -200,6 +210,29 @@ class _IndexedFrames:
         return ts, payload
 
 
+async def _ffprobe(args: list[str]) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "quiet", *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return out.decode().strip()
+
+
+async def _clip_has_audio(path: Path) -> bool:
+    out = await _ffprobe(["-select_streams", "a", "-show_entries", "stream=index",
+                          "-of", "csv=p=0", str(path)])
+    return bool(out)
+
+
+async def _clip_duration_s(path: Path) -> float:
+    out = await _ffprobe(["-show_entries", "format=duration", "-of", "csv=p=0", str(path)])
+    try:
+        return float(out)
+    except ValueError:
+        return 0.0
+
+
 @router.websocket("/ws/clip/{event_id}")
 async def ws_clip(ws: WebSocket, event_id: int) -> None:
     services: "Services" = ws.app.state.services
@@ -213,14 +246,27 @@ async def ws_clip(ws: WebSocket, event_id: int) -> None:
         return
 
     video_proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-i", str(clip_path),
+        "ffmpeg", "-nostdin", "-i", str(clip_path),
         "-vf", f"scale={CLIP_SIZE}:{CLIP_SIZE},fps={CLIP_FPS}",
         "-f", "image2pipe", "-vcodec", "mjpeg", "-",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
+    if await _clip_has_audio(clip_path):
+        audio_cmd = [
+            "ffmpeg", "-nostdin", "-i", str(clip_path), "-vn",
+            "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(AUDIO_RATE), "-ac", "1", "-",
+        ]
+    else:
+        # 无声片段兜底：anullsrc 生成与视频等长的静音 PCM，
+        # 保证 display 端"音频为时钟"假设恒成立
+        duration = await _clip_duration_s(clip_path)
+        audio_cmd = [
+            "ffmpeg", "-nostdin", "-f", "lavfi", "-t", f"{duration:.3f}",
+            "-i", f"anullsrc=r={AUDIO_RATE}:cl=mono",
+            "-f", "s16le", "-acodec", "pcm_s16le", "-",
+        ]
     audio_proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-i", str(clip_path), "-vn",
-        "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(AUDIO_RATE), "-ac", "1", "-",
+        *audio_cmd,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     assert video_proc.stdout is not None and audio_proc.stdout is not None

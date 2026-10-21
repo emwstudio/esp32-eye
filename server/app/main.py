@@ -61,7 +61,7 @@ class Services:
         self.ingest = IngestManager(settings, self.ring)
         self.recorder = Recorder(settings, self.ring, self.storage)
         self.identifier = Identifier(settings, self.storage, self.ring, id_fn=id_fn)
-        self.identifier.on_confirmed = lambda eid: self.spawn(self._on_confirmed(eid))
+        self.identifier.on_identified = lambda eid: self.spawn(self._on_identified(eid))
 
         if gate_fn is None:
             gate_client = VisionModelClient(
@@ -102,19 +102,28 @@ class Services:
         self.spawn(self.recorder.make_clip(event_id, start_ts, end_ts))
         self.spawn(self.identifier.identify(event_id, start_ts, end_ts))
 
-    async def _on_confirmed(self, event_id: int) -> None:
+    async def _on_identified(self, event_id: int) -> None:
+        """身份确认出终态后按状态广播。"""
         event = self.storage.get_event(event_id)
         if event is None:
             return
-        await self.bus.broadcast(
-            {
-                "type": "cat_confirmed",
-                "event_id": event_id,
-                "cat_id": event["cat_id"],
-                "confidence": event["confidence"],
-            }
-        )
-        await self.broadcast_count_updated()
+        status = event["status"]
+        if status == "confirmed" and event["cat_id"]:
+            await self.bus.broadcast(
+                {
+                    "type": "cat_confirmed",
+                    "event_id": event_id,
+                    "cat_id": event["cat_id"],
+                    "confidence": event["confidence"],
+                }
+            )
+            await self.broadcast_count_updated()
+        elif status == "unknown":
+            await self.bus.broadcast({"type": "cat_unknown", "event_id": event_id})
+        elif status == "discarded":
+            await self.bus.broadcast(
+                {"type": "event_discarded", "event_id": event_id, "reason": "false_positive"}
+            )
 
     async def broadcast_count_updated(self) -> None:
         summary = self.storage.today_summary()
