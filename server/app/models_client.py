@@ -48,6 +48,17 @@ class VisionModelClient:
     model: str
     timeout: float = 60.0
 
+    def _bypass_proxy(self) -> bool:
+        """本地地址（localhost/127.x/*.local/内网 IP）不走系统代理。"""
+        from urllib.parse import urlparse
+
+        host = urlparse(self.base_url).hostname or ""
+        if host in ("localhost",) or host.endswith(".local"):
+            return True
+        if host.startswith("127.") or host.startswith("192.168.") or host.startswith("10."):
+            return True
+        return False
+
     async def chat_content(self, content: list[dict]) -> str:
         """发送多模态 content（text/image_url 交错）并返回文本。"""
         payload = {
@@ -57,7 +68,9 @@ class VisionModelClient:
         }
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         url = self.base_url.rstrip("/") + "/chat/completions"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout, trust_env=not self._bypass_proxy()
+        ) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
