@@ -46,7 +46,10 @@ async def cat_avatar(request: Request, cat_id: str) -> Response:
     path = _svc(request).storage.cat_avatar_path(cat_id)
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="avatar not found")
-    img = Image.open(path).convert("RGB").resize((192, 192))
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+    side = min(w, h)
+    img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2)).resize((192, 192))
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return Response(content=buf.getvalue(), media_type="image/jpeg")

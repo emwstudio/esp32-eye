@@ -26,8 +26,19 @@ IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def b64_url(p: Path) -> str:
-    mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
-    return f"data:{mime};base64," + base64.b64encode(p.read_bytes()).decode()
+    """读图并归一化：长边压到 1024、转 JPEG q80，再编 base64。
+
+    手机原图（12MP+）直传会让 prompt 体积和推理延迟暴涨，模型收益却很小。
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.open(p).convert("RGB")
+    img.thumbnail((1024, 1024))
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def chat(base_url: str, model: str, content: list[dict], max_tokens: int = 64) -> str:
