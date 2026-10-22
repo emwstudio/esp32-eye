@@ -156,11 +156,9 @@ static void decode_fn(void *arg) {
     }
     jpg.setUserPointer(logical_bufs[lidx]);
     jpg.setPixelType(RGB565_LITTLE_ENDIAN);
-    esp_task_wdt_reset();  // 解码可能超 5s（病态帧），先喂一次系统看门狗
     jpg.decode(0, 0, 0);
-    esp_task_wdt_reset();
     jpg.close();
-    vTaskDelay(1);  // 给 IDLE 任务喘息，避免饿死 task_wdt
+    vTaskDelay(1);  // 给 IDLE 任务喘息
     pool_put(jpeg_free, it.idx);
     int64_t t1 = esp_timer_get_time();
     stat_decode_us[core_id] += (uint32_t)(t1 - t_wait0);

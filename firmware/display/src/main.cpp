@@ -12,6 +12,7 @@
 #include "net/net_rest.h"
 #include "net/net_events.h"
 #include "net/rlog.h"
+#include "esp_task_wdt.h"
 #include "net/live.h"
 
 // 首屏数据加载（工作线程，避免阻塞 LVGL）
@@ -97,6 +98,7 @@ void setup() {
 
   state_init();
   rlog_init();
+  esp_task_wdt_deinit();  // 系统 TWDT 退役：高负载直播管线会饿死 IDLE 任务被它误杀；卡死兜底由 live_wd 负责
 
   if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
     Serial.println("[BOOT] LittleFS mount failed");

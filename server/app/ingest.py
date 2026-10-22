@@ -139,7 +139,7 @@ class CamIngest:
         backoff = BACKOFF_MIN
         while True:
             try:
-                async with websockets.connect(resolve_local_host(url), max_size=None, compression=None) as ws:
+                async with websockets.connect(resolve_local_host(url), max_size=None, compression=None, proxy=None) as ws:
                     self.audio_connected = True
                     self._device_ts_warned = False  # 每次重连后重新判定 NTP 同步
                     log.info("cam audio stream connected: %s", url)
