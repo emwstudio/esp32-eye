@@ -231,10 +231,7 @@ static void build_main() {
   // 左侧时间（往右收 30px，避开圆角）
   lbl_clock = make_label(scr_main, "--:--");
   lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 38, 6);
-  lv_obj_set_style_bg_color(lbl_clock, lv_color_hex(0x000000), 0);
-  lv_obj_set_style_bg_opa(lbl_clock, LV_OPA_50, 0);
-  lv_obj_set_style_pad_all(lbl_clock, 4, 0);
-  lv_obj_set_style_radius(lbl_clock, 6, 0);
+  lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0x9fb3c8), 0);
 
   // 中间大标题
   lv_obj_t *lbl_title = make_label(scr_main, "猫咪喝水计数器");

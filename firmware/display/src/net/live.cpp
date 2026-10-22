@@ -1,4 +1,5 @@
 #include "live.h"
+#include "esp_task_wdt.h"
 #include "rlog.h"
 #include "config.h"
 #include "board_pins.h"
@@ -136,15 +137,30 @@ static void decode_fn(void *arg) {
       pool_put(jpeg_free, it.idx);
       continue;
     }
-    if (!jpg.openRAM(jpeg_bufs[it.idx], it.len, live_jpeg_draw)) {
+    // 帧完整性校验：畸形帧会把 JPEGDEC 卡进病态解码（>5s）→ task_wdt 复位（真机黑屏根因）
+    uint8_t *jb = jpeg_bufs[it.idx];
+    bool frame_ok = it.len > 4096 && it.len < 400 * 1024 &&
+                    jb[0] == 0xFF && jb[1] == 0xD8 &&
+                    jb[it.len - 2] == 0xFF && jb[it.len - 1] == 0xD9;
+    if (!frame_ok) {
+      static uint32_t bad_n = 0;
+      if (++bad_n % 10 == 1) rlogf("[DEC%d] drop bad frame len=%u", core_id, (unsigned)it.len);
+      pool_put(jpeg_free, it.idx);
+      pool_put(logical_free, lidx);
+      continue;
+    }
+    if (!jpg.openRAM(jb, it.len, live_jpeg_draw)) {
       pool_put(jpeg_free, it.idx);
       pool_put(logical_free, lidx);
       continue;
     }
     jpg.setUserPointer(logical_bufs[lidx]);
     jpg.setPixelType(RGB565_LITTLE_ENDIAN);
+    esp_task_wdt_reset();  // 解码可能超 5s（病态帧），先喂一次系统看门狗
     jpg.decode(0, 0, 0);
+    esp_task_wdt_reset();
     jpg.close();
+    vTaskDelay(1);  // 给 IDLE 任务喘息，避免饿死 task_wdt
     pool_put(jpeg_free, it.idx);
     int64_t t1 = esp_timer_get_time();
     stat_decode_us[core_id] += (uint32_t)(t1 - t_wait0);
@@ -158,7 +174,7 @@ static void decode_fn(void *arg) {
 
 // ---- 直推（面板原生方向；视频带 y=56..256，整块写——标题栏独立后带内无 LVGL 对象。
 // 分块仅为持锁粒度让 UI 插空；200 不是 24 的倍数，末块部分行）----
-#define VIDEO_BAND_Y 56
+#define VIDEO_BAND_Y 34
 static void push_video_frame(const uint16_t *logical_buf) {
   uint16_t *stage = bsp_video_stage_buf();  // 480*24 px，内部 DMA RAM
   if (!stage) return;
