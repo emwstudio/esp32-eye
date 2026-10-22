@@ -103,9 +103,15 @@ static int live_jpeg_draw(JPEGDRAW *d) {
 }
 
 // 帧计时打点
-static uint32_t stat_decode_us[2] = {0, 0}, stat_decode_n[2] = {0, 0}, stat_push_us = 0, stat_frames = 0;
+static uint32_t stat_decode_us[2] = {0, 0}, stat_decode_n[2] = {0, 0}, stat_push_us = 0;
+static uint32_t stat_frames = 0;   // 本窗口实际推帧数（算 fps）
+static uint32_t stat_proc = 0;     // 本窗口处理的解码项数（STAT 打点节奏，含离线跳过的）
 static int64_t stat_window_start = 0;
 static void stat_tick();  // 前向声明
+
+// ---- 直播看门狗（自愈：永远在线是产品目标）----
+static volatile uint32_t last_push_ms = 0;  // 最后一次实际推帧上屏
+static TaskHandle_t wd_task = NULL;
 
 static void decode_fn(void *arg) {
   int core_id = (int)(intptr_t)arg;
@@ -250,8 +256,11 @@ static void push_fn(void *) {
       int64_t t0 = esp_timer_get_time();
       push_video_frame(logical_bufs[cur.idx]);
       stat_push_us += (uint32_t)(esp_timer_get_time() - t0);
+      last_push_ms = millis();  // 看门狗喂狗：实际推帧才算"活着"
+      stat_frames++;
     }
     pool_put(logical_free, cur.idx);
+    stat_proc++;
     stat_tick();
   }
   push_task = NULL;
@@ -342,18 +351,19 @@ static void udp_process(const uint8_t *d, size_t n) {
   }
 }
 
-static void udp_register() {
+static bool udp_register(bool log_fail) {
   HTTPClient http;
   http.setTimeout(3000);
-  if (!http.begin(String(SERVER_BASE) + "/api/live_udp?port=5060")) return;
+  if (!http.begin(String(SERVER_BASE) + "/api/live_udp?port=5060")) return false;
   int code = http.GET();
-  rlogf("[UDP] register/renew -> %d", code);
+  if (log_fail || code == 200) rlogf("[UDP] register/renew -> %d", code);
   http.end();
+  return code == 200;
 }
 
 static void udp_fn(void *) {
-  udp_register();  // 启动即注册
-  uint32_t last_reg = millis();
+  udp_register(true);  // 启动即注册
+  uint32_t next_renew = millis() + 30000;
   if (!udp.listen(UDP_PORT)) {
     rlogf("[UDP] listen %d failed", UDP_PORT);
   }
@@ -370,10 +380,10 @@ static void udp_fn(void *) {
       reasm_active = false;
       stat_udp_frag_drop++;
     }
-    // 30s 续期
-    if (millis() - last_reg > 30000) {
-      last_reg = millis();
-      udp_register();
+    // 续期（看门狗驱动思路：活着就续；失败 5s 重试，不等下个 30s 周期）
+    if ((int32_t)(millis() - next_renew) >= 0) {
+      bool ok = udp_register(false);
+      next_renew = millis() + (ok ? 30000 : 5000);
     }
     // UDP 断流回退 TCP
     if (!tcp_active && millis() - last_udp_frame_ms > UDP_FALLBACK_MS) {
@@ -569,16 +579,17 @@ static void live_audio_fn(void *) {
 
 // 每 30 帧打一次：实测 fps / 双核解码均耗 / 直推（含 DMA）/ 去重数 / 丢帧 / LVGL flush
 static void stat_tick() {
-  if (++stat_frames < 30) return;
+  if (++stat_proc < 30) return;
   int64_t now = esp_timer_get_time();
-  float fps = stat_window_start ? 30.0f * 1e6f / (float)(now - stat_window_start) : 0;
+  float fps = stat_window_start ? (float)stat_frames * 1e6f / (float)(now - stat_window_start) : 0;
   uint32_t fus, fcnt;
   bsp_flush_stats(&fus, &fcnt);
   rlogf("[STAT] fps=%.1f dec0=%ums(n%u) dec1=%ums(n%u) push=%ums(draw%ums) udp=%u/%u/%u dup=%u drop=%u flush=%ums heap=%u flv=%u",
         fps,
         stat_decode_n[0] ? (unsigned)(stat_decode_us[0] / stat_decode_n[0] / 1000) : 0, (unsigned)stat_decode_n[0],
         stat_decode_n[1] ? (unsigned)(stat_decode_us[1] / stat_decode_n[1] / 1000) : 0, (unsigned)stat_decode_n[1],
-        (unsigned)(stat_push_us / 30 / 1000), (unsigned)(stat_draw_us / 30 / 1000),
+        stat_frames ? (unsigned)(stat_push_us / stat_frames / 1000) : 0,
+        stat_frames ? (unsigned)(stat_draw_us / stat_frames / 1000) : 0,
         (unsigned)stat_udp_frames, (unsigned)stat_udp_frag_drop, (unsigned)stat_udp_rx_drop,
         (unsigned)stat_dup, (unsigned)stat_drops,
         fcnt ? (unsigned)(fus / fcnt / 1000) : 0, (unsigned)xPortGetFreeHeapSize(),
@@ -593,7 +604,52 @@ static void stat_tick() {
   stat_dup = 0;
   stat_drops = 0;
   stat_frames = 0;
+  stat_proc = 0;
   stat_window_start = now;
+}
+
+// ---- 直播看门狗：5s 无帧上屏 → 重注册 UDP + 确保 TCP 回退；20s → 重启 live 全套；
+// 60s → esp_restart（仪表盘设备要永远在线，重启代价可接受）。不被 live_stop 管理。
+static bool udp_register(bool log_fail);  // 前向声明
+
+static void live_wd_fn(void *) {
+  int level = 0;
+  uint32_t outage_since = 0;  // 持续无帧的起点（只有实际推帧才清零，L2 重启不清它）
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    if (!live_running) {
+      level = 0;
+      outage_since = 0;
+      continue;
+    }
+    uint32_t idle = millis() - last_push_ms;
+    if (idle < 5000) {
+      level = 0;
+      outage_since = 0;
+      continue;
+    }
+    if (!outage_since) outage_since = millis() - idle;
+    uint32_t outage = millis() - outage_since;  // 连续无帧总时长
+    if (outage > 60000) {
+      rlogf("[WD] L3: 连续 %ums 无帧上屏，esp_restart heap=%u", (unsigned)outage, (unsigned)xPortGetFreeHeapSize());
+      vTaskDelay(pdMS_TO_TICKS(300));  // 给 rlog 一个发送窗口
+      esp_restart();
+    }
+    if (idle > 20000 && level < 2) {
+      level = 2;
+      rlogf("[WD] L2: %ums 无帧，重启 live 全套 heap=%u", (unsigned)idle, (unsigned)xPortGetFreeHeapSize());
+      live_start();  // 内部先 live_stop；wd 任务不在 live_stop 管理清单内
+    } else if (idle > 5000 && level < 1) {
+      level = 1;
+      rlogf("[WD] L1: %ums 无帧，重注册 UDP + 确保 TCP 回退", (unsigned)idle);
+      udp_register(false);
+      if (!reader_tasks[0]) {  // udp_fn 若死了，这里兜底直接拉 TCP
+        tcp_active = true;
+        BaseType_t r = xTaskCreatePinnedToCore(live_video_fn, "live_v0", 5120, (void *)0, 4, &reader_tasks[0], 0);
+        rlogf("[WD] L1 TCP reader create r=%ld", (long)r);
+      }
+    }
+  }
 }
 
 void live_start() {
@@ -614,6 +670,9 @@ void live_start() {
   if (!dec_q) dec_q = xQueueCreate(8, sizeof(DecItem));
   if (!udp_sem) udp_sem = xSemaphoreCreateCounting(UDP_RING_N, 0);
   last_udp_frame_ms = millis();
+  // 注意：不能在这里重置 last_push_ms——看门狗的 outage 时钟必须跨 live 重启保持，
+  // 否则每次 L2 重启都清零，L3（60s esp_restart）永远到不了。首次启动的宽限在
+  // wd 任务创建处初始化。
   // 确认 JPEGDEC S3 SIMD 是否启用（与 jpeg.inl 的判定一致）
 #if defined(ARDUINO_ARCH_ESP32) && __has_include("dsps_fft2r_platform.h")
   rlogf("[LIVE] JPEGDEC S3 SIMD: ON");
@@ -626,6 +685,12 @@ void live_start() {
   // UDP 优先：先起 UDP 接收任务（内含注册/续期/回退监督），5s 无帧才回退 TCP reader
   BaseType_t ru = xTaskCreatePinnedToCore(udp_fn, "live_udp", 6144, NULL, 4, &udp_task, 0);
   BaseType_t ra = xTaskCreatePinnedToCore(live_audio_fn, "live_a", 4096, NULL, 4, &audio_task, 0);
+  // 看门狗只建一次，不归 live_stop 管（它要能重启 live 全套）
+  if (!wd_task) {
+    last_push_ms = millis();  // 首次启动宽限：从这里起算
+    xTaskCreatePinnedToCore(live_wd_fn, "live_wd", 4096, NULL, 3, &wd_task, 1);
+    rlogf("[WD] 看门狗已启动");
+  }
   rlogf("[LIVE] start: push=%ld dec=%ld/%ld udp=%ld au=%ld heap=%u",
         (long)rp, (long)rd0, (long)rd1, (long)ru, (long)ra, (unsigned)xPortGetFreeHeapSize());
 }
@@ -643,7 +708,7 @@ void live_stop() {
   if (udp_sem) xSemaphoreGive(udp_sem);                               // 唤醒 UDP 任务
   uint32_t t0 = millis();
   bool any = true;
-  while (any && millis() - t0 < 1500) {
+  while (any && millis() - t0 < 2500) {  // 网络任务阻塞中，宽限 2.5s 再强杀（强杀会泄漏其 HTTPClient）
     any = audio_task || push_task || udp_task;
     for (int i = 0; i < N_VIDEO_CONNS; i++) any = any || reader_tasks[i];
     for (int i = 0; i < 2; i++) any = any || decode_tasks[i];

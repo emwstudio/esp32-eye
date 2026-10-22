@@ -126,3 +126,9 @@ src/
 - 触摸无 UI 交互，仅诊断打点。
 - 视频直推覆盖区（时钟/状态点）靠每帧后 invalidate 两个小标签重绘，理论上有
   亚帧级覆盖闪烁，肉眼不可见。
+
+13. **直播自愈看门狗**（live_wd，只建一次、不归 live_stop 管）：last_push_ms 只在
+    实际推帧时更新，outage 时钟跨 live 重启保持（live_start 不得重置，否则 L3 永远
+    不到）。升级链：5s 无帧→重注册 UDP+TCP 回退；20s→重启 live 全套；60s→esp_restart。
+    UDP 续期失败 5s 重试。STAT 的 fps 只计实际推帧（曾把"处理数"当 fps 导致离线期
+    push=0 但 fps=16 的假象）。live_stop 优雅等待 2.5s（强杀会泄漏其 HTTPClient）。
