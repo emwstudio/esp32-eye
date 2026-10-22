@@ -63,10 +63,26 @@ static lv_obj_t *banner, *banner_lbl;
 static lv_obj_t *cat_cards[4], *cat_imgs[4], *cat_names[4], *cat_counts[4];
 static lv_obj_t *home_empty;
 
-// 直播直推会覆盖时钟/状态点像素，每次直推后调用本函数重绘覆盖层标签（调用方持 lv_lock）
-void ui_overlay_invalidate() {
-  if (lbl_clock) lv_obj_invalidate(lbl_clock);
-  if (lbl_status) lv_obj_invalidate(lbl_status);
+// 视频带排除区（闪烁修复）：直推挖洞跳过这些矩形（时钟/状态点），LVGL 只在
+// 文本变化时重绘它们。不再每帧 invalidate（那会让 LVGL 用底色覆盖视频 → 闪烁）。
+static lv_area_t video_excl[2];
+static bool video_excl_valid = false;
+
+static void compute_video_excl() {
+  if (video_excl_valid || !lbl_clock || !lbl_status) return;
+  lv_obj_get_coords(lbl_clock, &video_excl[0]);
+  lv_obj_get_coords(lbl_status, &video_excl[1]);
+  video_excl_valid = true;
+}
+
+// 直推调用：取第 i 个排除矩形（视频带内），返回 false=没有更多
+bool ui_video_excl(int i, int *x1, int *y1, int *x2, int *y2) {
+  if (!video_excl_valid || i < 0 || i >= 2) return false;
+  *x1 = video_excl[i].x1;
+  *y1 = video_excl[i].y1;
+  *x2 = video_excl[i].x2;
+  *y2 = video_excl[i].y2;
+  return true;
 }
 
 static const lv_font_t *ui_font() { return font_cjk ? font_cjk : &lv_font_montserrat_20; }
@@ -342,6 +358,11 @@ void ui_init() {
 
 // ---------- 主循环处理 ----------
 void ui_process() {
+  if (!video_excl_valid) {  // 首帧后布局完成，取一次标签坐标作为直推排除区
+    lv_lock();
+    compute_video_excl();
+    lv_unlock();
+  }
   Cmd c;
   while (xQueueReceive(cmd_q, &c, 0) == pdTRUE) {
     switch (c.type) {

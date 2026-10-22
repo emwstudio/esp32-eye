@@ -3,6 +3,7 @@
 #include "config.h"
 #include "board_pins.h"
 #include "ui/ui.h"
+#include "state.h"
 #include "bsp/bsp_audio.h"
 #include "bsp/bsp_display.h"
 #include <WiFi.h>
@@ -150,6 +151,44 @@ static void decode_fn(void *arg) {
 }
 
 // ---- 直推（面板原生方向，480×24 行块；分块仅为持锁粒度让 UI 插空）----
+// 闪烁修复：视频带内的时钟/状态点标签矩形挖洞跳过（视频不覆盖标签像素，
+// LVGL 只在文本变化时重绘它们）。曾每帧 invalidate 标签 → LVGL 每帧用底色
+// 覆盖该区域 ↔ 直推交替写 → 肉眼可见闪烁。
+static void draw_masked_chunk(uint16_t *stage, int y0, int h) {
+  struct R { int x1, x2; };
+  R rs[2];
+  int rn = 0;
+  int ry1 = y0 + h, ry2 = y0;  // 与排除矩形相交的行范围
+  for (int i = 0; i < 2; i++) {
+    int x1, yy1, x2, yy2;
+    if (ui_video_excl(i, &x1, &yy1, &x2, &yy2) && yy2 >= y0 && yy1 < y0 + h) {
+      rs[rn].x1 = x1 < 0 ? 0 : x1;
+      rs[rn].x2 = x2 > LIVE_W - 1 ? LIVE_W - 1 : x2;
+      rn++;
+      ry1 = min(ry1, max(yy1, y0));
+      ry2 = max(ry2, min(yy2 + 1, y0 + h));
+    }
+  }
+  if (rn == 0) {
+    gfx->draw16bitRGBBitmap(0, y0, stage, LIVE_W, h);
+    return;
+  }
+  // 矩形互不重叠（时钟左/状态右），按 x1 排序
+  if (rn == 2 && rs[1].x1 < rs[0].x1) { R t = rs[0]; rs[0] = rs[1]; rs[1] = t; }
+  if (ry1 > y0) gfx->draw16bitRGBBitmap(0, y0, stage, LIVE_W, ry1 - y0);
+  int mh = ry2 - ry1;
+  if (mh > 0) {
+    uint16_t *base = stage + (size_t)(ry1 - y0) * LIVE_W;
+    int x = 0;
+    for (int i = 0; i < rn; i++) {
+      if (rs[i].x1 > x) gfx->draw16bitRGBBitmap(x, ry1, base + x, rs[i].x1 - x, mh);
+      x = rs[i].x2 + 1;
+    }
+    if (x < LIVE_W) gfx->draw16bitRGBBitmap(x, ry1, base + x, LIVE_W - x, mh);
+  }
+  if (ry2 < y0 + h) gfx->draw16bitRGBBitmap(0, ry2, stage + (size_t)(ry2 - y0) * LIVE_W, LIVE_W, y0 + h - ry2);
+}
+
 static void push_video_frame(const uint16_t *logical_buf) {
   uint16_t *stage = bsp_video_stage_buf();  // 480*24 px，内部 DMA RAM
   if (!stage) return;
@@ -158,14 +197,10 @@ static void push_video_frame(const uint16_t *logical_buf) {
     memcpy(stage, logical_buf + (size_t)y0 * LIVE_W, LIVE_W * CHUNK * 2);
     int64_t td = esp_timer_get_time();
     lv_lock();
-    gfx->draw16bitRGBBitmap(0, y0, stage, LIVE_W, CHUNK);
+    draw_masked_chunk(stage, y0, CHUNK);
     lv_unlock();
     stat_draw_us += (uint32_t)(esp_timer_get_time() - td);
   }
-  // 视频直推覆盖了时钟/状态点所在区域，让 LVGL 重绘这两个小标签
-  lv_lock();
-  ui_overlay_invalidate();
-  lv_unlock();
 }
 
 // 有序直推：pending 小表按 seq 归序，缺号超时跳过（直播丢帧保新）
@@ -207,9 +242,15 @@ static void push_fn(void *) {
     pending[best] = pending[--pn];
     have_expected = true;
     expected = cur.seq + 1;
-    int64_t t0 = esp_timer_get_time();
-    push_video_frame(logical_bufs[cur.idx]);
-    stat_push_us += (uint32_t)(esp_timer_get_time() - t0);
+    // 离线遮罩盖住视频带时不直推（遮罩由 LVGL 持有，直推会与它交替闪烁）
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    bool off = g_state.offline_shown;
+    xSemaphoreGive(state_mutex);
+    if (!off) {
+      int64_t t0 = esp_timer_get_time();
+      push_video_frame(logical_bufs[cur.idx]);
+      stat_push_us += (uint32_t)(esp_timer_get_time() - t0);
+    }
     pool_put(logical_free, cur.idx);
     stat_tick();
   }
@@ -533,14 +574,15 @@ static void stat_tick() {
   float fps = stat_window_start ? 30.0f * 1e6f / (float)(now - stat_window_start) : 0;
   uint32_t fus, fcnt;
   bsp_flush_stats(&fus, &fcnt);
-  rlogf("[STAT] fps=%.1f dec0=%ums(n%u) dec1=%ums(n%u) push=%ums(draw%ums) udp=%u/%u/%u dup=%u drop=%u flush=%ums heap=%u",
+  rlogf("[STAT] fps=%.1f dec0=%ums(n%u) dec1=%ums(n%u) push=%ums(draw%ums) udp=%u/%u/%u dup=%u drop=%u flush=%ums heap=%u flv=%u",
         fps,
         stat_decode_n[0] ? (unsigned)(stat_decode_us[0] / stat_decode_n[0] / 1000) : 0, (unsigned)stat_decode_n[0],
         stat_decode_n[1] ? (unsigned)(stat_decode_us[1] / stat_decode_n[1] / 1000) : 0, (unsigned)stat_decode_n[1],
         (unsigned)(stat_push_us / 30 / 1000), (unsigned)(stat_draw_us / 30 / 1000),
         (unsigned)stat_udp_frames, (unsigned)stat_udp_frag_drop, (unsigned)stat_udp_rx_drop,
         (unsigned)stat_dup, (unsigned)stat_drops,
-        fcnt ? (unsigned)(fus / fcnt / 1000) : 0, (unsigned)xPortGetFreeHeapSize());
+        fcnt ? (unsigned)(fus / fcnt / 1000) : 0, (unsigned)xPortGetFreeHeapSize(),
+        (unsigned)bsp_flush_video_count());
   stat_decode_us[0] = stat_decode_us[1] = 0;
   stat_decode_n[0] = stat_decode_n[1] = 0;
   stat_udp_frames = 0;

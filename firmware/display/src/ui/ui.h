@@ -22,6 +22,6 @@ void ui_cmd_set_offline(bool offline, const char *reason);
 #define LIVE_W 480
 #define LIVE_H 240
 
-// 直播直推覆盖了时钟/状态点区域后，live 任务调用此函数让 LVGL 重绘覆盖层标签。
-// 调用方必须已持 lv_lock。
-void ui_overlay_invalidate();
+// 视频带排除区（闪烁修复）：直推挖洞跳过这些矩形（时钟/状态点），
+// LVGL 只在文本变化时重绘它们。直推调用：取第 i 个排除矩形，返回 false=没有更多。
+bool ui_video_excl(int i, int *x1, int *y1, int *x2, int *y2);

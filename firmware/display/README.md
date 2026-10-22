@@ -74,6 +74,10 @@ sed -i '' 's|#include "lvgl/lvgl.h"|#include "lvgl.h"|' src/font_cjk20.c
     弃帧）→ 双核解码管线。TCP reader 保留为回退：5s 无完整帧自动拉起、UDP 恢复即停。
     实测投递 = 源产帧率（零丢片）。残留瓶颈在 CAM→服务端链路（cam video 反复掉线，
     源只产 ~5.5fps），不是桌面屏。
+12. **视频带内 LVGL 对象必须挖洞，不能每帧 invalidate**：直推与 LVGL 交替写同一区域
+    就是闪烁（flv 打点：修复前 ~2.3 次/帧，修复后 <1 次/秒，仅剩时钟每秒刷新）。
+    时钟/状态点矩形经 `ui_video_excl()` 暴露给直推做分块挖洞；离线遮罩显示期间
+    直推整体暂停（push_fn 里查 g_state.offline_shown）。
 
 ## 结构
 

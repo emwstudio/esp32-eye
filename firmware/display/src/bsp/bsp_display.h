@@ -27,3 +27,6 @@ void bsp_flush_stats(uint32_t *total_us, uint32_t *count);
 
 // 视频直推 staging 缓冲（与 LVGL flush 共用 rot_buf：双方都在 lv_lock 内使用，互斥安全）
 uint16_t *bsp_video_stage_buf();
+
+// 读取并清零视频带（y<240）内的 LVGL flush 次数（闪烁诊断）
+uint32_t bsp_flush_video_count();
