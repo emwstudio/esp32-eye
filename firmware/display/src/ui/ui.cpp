@@ -63,27 +63,7 @@ static lv_obj_t *banner, *banner_lbl;
 static lv_obj_t *cat_cards[4], *cat_imgs[4], *cat_names[4], *cat_counts[4];
 static lv_obj_t *home_empty;
 
-// 视频带排除区（闪烁修复）：直推挖洞跳过这些矩形（时钟/状态点），LVGL 只在
-// 文本变化时重绘它们。不再每帧 invalidate（那会让 LVGL 用底色覆盖视频 → 闪烁）。
-static lv_area_t video_excl[2];
-static bool video_excl_valid = false;
-
-static void compute_video_excl() {
-  if (video_excl_valid || !lbl_clock || !lbl_status) return;
-  lv_obj_get_coords(lbl_clock, &video_excl[0]);
-  lv_obj_get_coords(lbl_status, &video_excl[1]);
-  video_excl_valid = true;
-}
-
-// 直推调用：取第 i 个排除矩形（视频带内），返回 false=没有更多
-bool ui_video_excl(int i, int *x1, int *y1, int *x2, int *y2) {
-  if (!video_excl_valid || i < 0 || i >= 2) return false;
-  *x1 = video_excl[i].x1;
-  *y1 = video_excl[i].y1;
-  *x2 = video_excl[i].x2;
-  *y2 = video_excl[i].y2;
-  return true;
-}
+// 标题栏独立后视频带内无任何 LVGL 对象，直推整块写屏（无需挖洞/逐帧 invalidate）
 
 static const lv_font_t *ui_font() { return font_cjk ? font_cjk : &lv_font_montserrat_20; }
 
@@ -103,7 +83,7 @@ static void banner_show(const char *text) {
   lv_anim_init(&a);
   lv_anim_set_var(&a, banner);
   lv_anim_set_exec_cb(&a, banner_anim_y);
-  lv_anim_set_values(&a, 480, 244);  // 从屏外下方滑到视频带/猫卡交界
+  lv_anim_set_values(&a, 480, 260);  // 从屏外下方滑到视频带下缘（浮在猫卡区顶部）
   lv_anim_set_time(&a, 250);
   lv_anim_start(&a);
 }
@@ -236,30 +216,40 @@ static void refresh_cards() {
 }
 
 // ---------- 构建页面 ----------
+// 布局（面板原生方向 480×480）：
+//   y=0..56    标题栏（左时钟右状态点，各向内收 30px 避开圆角；中间大标题）
+//   y=56..256  视频带 480×200（/api/live_band?h=200，无 LVGL 对象，直推独占）
+//   y=256..480 2×2 猫卡片（每张 240×112）
+#define TITLE_H 56
+#define VIDEO_Y 56
 static void build_main() {
   scr_main = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scr_main, lv_color_hex(0x101418), 0);
   lv_obj_clear_flag(scr_main, LV_OBJ_FLAG_SCROLLABLE);
 
-  // 上半屏为直播直推区（无 LVGL 对象），LVGL 只在时钟/状态点/横幅变化时重绘对应小区域
-
-  // 左上角时钟（白色字 + 半透明底）
+  // ---- 标题栏 ----
+  // 左侧时间（往右收 30px，避开圆角）
   lbl_clock = make_label(scr_main, "--:--");
-  lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 8, 6);
+  lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 38, 16);
   lv_obj_set_style_bg_color(lbl_clock, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(lbl_clock, LV_OPA_50, 0);
   lv_obj_set_style_pad_all(lbl_clock, 4, 0);
   lv_obj_set_style_radius(lbl_clock, 6, 0);
 
-  // 右上角连接状态点
+  // 中间大标题
+  lv_obj_t *lbl_title = make_label(scr_main, "猫猫喝水计数器");
+  lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 14);
+  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x9fd3b8), 0);
+
+  // 右侧连接状态点（往左收 30px，避开圆角）
   lbl_status = make_label(scr_main, "●");
-  lv_obj_align(lbl_status, LV_ALIGN_TOP_RIGHT, -10, 6);
+  lv_obj_align(lbl_status, LV_ALIGN_TOP_RIGHT, -40, 16);
   lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xd94f4f), 0);
 
-  // 离线遮罩（视频区）
+  // 离线遮罩（视频带）
   offline_mask = lv_obj_create(scr_main);
   lv_obj_set_size(offline_mask, LIVE_W, LIVE_H);
-  lv_obj_set_pos(offline_mask, 0, 0);
+  lv_obj_set_pos(offline_mask, 0, VIDEO_Y);
   lv_obj_set_style_bg_color(offline_mask, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(offline_mask, LV_OPA_70, 0);
   lv_obj_set_style_border_width(offline_mask, 0, 0);
@@ -268,7 +258,7 @@ static void build_main() {
   lv_obj_center(offline_lbl);
   lv_obj_add_flag(offline_mask, LV_OBJ_FLAG_HIDDEN);
 
-  // 喝水横幅（视频区与猫卡区交界下方，默认藏在猫卡区上缘外）
+  // 喝水横幅（浮在猫卡区顶部一行，默认藏在屏外下方）
   banner = lv_obj_create(scr_main);
   lv_obj_set_size(banner, 440, 40);
   lv_obj_set_pos(banner, 20, 480);  // 初始藏在屏外下方
@@ -282,12 +272,12 @@ static void build_main() {
   banner_lbl = make_label(banner, "");
   lv_obj_center(banner_lbl);
 
-  // 下半屏：2x2 猫卡片（每格 240x120）
+  // 猫卡片区：2x2（每格 240x112）
   for (int i = 0; i < 4; i++) {
     lv_obj_t *card = lv_obj_create(scr_main);
     cat_cards[i] = card;
-    lv_obj_set_size(card, 236, 116);
-    lv_obj_set_pos(card, (i % 2) * 240 + 2, 240 + (i / 2) * 120 + 2);
+    lv_obj_set_size(card, 236, 108);
+    lv_obj_set_pos(card, (i % 2) * 240 + 2, 256 + (i / 2) * 112 + 2);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x181d23), 0);
     lv_obj_set_style_radius(card, 14, 0);
     lv_obj_set_style_border_width(card, 2, 0);
@@ -314,14 +304,14 @@ static void build_main() {
 
     // 右上：名字；右下：次数
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 104, 22);
+    lv_obj_set_pos(cat_names[i], 104, 18);
     cat_counts[i] = make_label(card, "0 次");
-    lv_obj_set_pos(cat_counts[i], 104, 58);
+    lv_obj_set_pos(cat_counts[i], 104, 54);
     lv_obj_set_style_text_color(cat_counts[i], lv_color_hex(0x9fd3b8), 0);
   }
 
   home_empty = make_label(scr_main, "等待猫咪档案…");
-  lv_obj_align(home_empty, LV_ALIGN_BOTTOM_MID, 0, -110);
+  lv_obj_align(home_empty, LV_ALIGN_BOTTOM_MID, 0, -100);
   lv_obj_add_flag(home_empty, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -358,11 +348,6 @@ void ui_init() {
 
 // ---------- 主循环处理 ----------
 void ui_process() {
-  if (!video_excl_valid) {  // 首帧后布局完成，取一次标签坐标作为直推排除区
-    lv_lock();
-    compute_video_excl();
-    lv_unlock();
-  }
   Cmd c;
   while (xQueueReceive(cmd_q, &c, 0) == pdTRUE) {
     switch (c.type) {

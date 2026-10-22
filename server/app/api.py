@@ -156,8 +156,8 @@ from .udp_live import band_jpeg as _band_jpeg  # noqa: F401  # 兼容既有引�
 
 
 @router.get("/api/live_band")
-async def live_video_band(request: Request) -> StreamingResponse:
-    """MJPEG 流（宽屏带）：缩放后中心裁 480×240，~10fps，供桌面屏上半屏。"""
+async def live_video_band(request: Request, h: int = 240) -> StreamingResponse:
+    """MJPEG 流（宽屏带）：缩放后中心裁 480×h（h 默认 240，桌面屏用 200）。"""
     services = _svc(request)
 
     async def gen() -> AsyncIterator[bytes]:
@@ -165,7 +165,7 @@ async def live_video_band(request: Request) -> StreamingResponse:
         while True:
             # 发送所有新帧（latest-only 会在 TCP 大读到齐时合并丢帧，实测腰斩帧率）
             for frame in services.ring.frames_since(last_sent_ts):
-                jpeg = await _get_band_jpeg(frame.jpeg, frame.ts)
+                jpeg = await _get_band_jpeg(frame.jpeg, frame.ts, h)
                 if jpeg is None:
                     continue
                 last_sent_ts = frame.ts
@@ -176,17 +176,18 @@ async def live_video_band(request: Request) -> StreamingResponse:
 
 
 @router.get("/api/live_udp")
-async def live_udp_register(request: Request, port: int = 5060) -> dict:
+async def live_udp_register(request: Request, port: int = 5060, h: int = 200) -> dict:
     """UDP 直播注册：桌面屏调用后，服务端把直播带帧以 UDP 推送到 <调用者IP>:port。
 
     TCP 到 ESP32 的投递受 lwIP 窗口/延迟 ACK 限制在 ~5fps；UDP 无此语义。
     注册有效期 60 秒，客户端需周期续期。帧分片格式见 UdpLivePush。
+    h 为直播带高度（桌面屏标题栏布局用 200）。
     """
     svc = _svc(request)
     host = request.client.host if request.client else None
     if not host:
         raise HTTPException(status_code=400, detail="no client host")
-    svc.udp_live.register(host, port)
+    svc.udp_live.register(host, port, band_h=h)
     return {"ok": True, "target": f"{host}:{port}", "ttl_s": 60}
 
 

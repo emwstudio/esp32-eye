@@ -25,33 +25,38 @@ HDR_FMT = "<IHH"
 HDR_LEN = struct.calcsize(HDR_FMT)
 
 
-def band_jpeg(jpeg: bytes, quality: int = 55) -> bytes | None:
-    """缩放后中心裁 480×240。半截帧返回 None。"""
+def band_jpeg(jpeg: bytes, quality: int = 55, band_h: int = 240) -> bytes | None:
+    """缩放后中心裁 480×band_h。半截帧返回 None。"""
     try:
         img = Image.open(io.BytesIO(jpeg)).convert("RGB")
     except OSError:
         return None
     w, h = img.size
     img = img.resize((480, int(h * 480 / w)))
-    top = max(0, (img.size[1] - 240) // 2)
-    img = img.crop((0, top, 480, top + 240))
+    if img.size[1] < band_h:  # 源不够高就不裁
+        band_h = img.size[1]
+    top = max(0, (img.size[1] - band_h) // 2)
+    img = img.crop((0, top, 480, top + band_h))
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
 
 
-# 全进程共享的直播带编码缓存（同一源帧只编码一次）
-_band_cache: dict[str, object] = {"ts": 0.0, "jpeg": b""}
+# 全进程共享的直播带编码缓存（同一源帧同一高度只编码一次）
+_band_cache: dict[tuple[float, int], bytes] = {}
 
 
-async def get_band_jpeg(frame_jpeg: bytes, ts: float) -> bytes | None:
-    if _band_cache["ts"] != ts:
-        jpeg = await asyncio.to_thread(band_jpeg, frame_jpeg)
+async def get_band_jpeg(frame_jpeg: bytes, ts: float, band_h: int = 240) -> bytes | None:
+    key = (ts, band_h)
+    if key not in _band_cache:
+        jpeg = await asyncio.to_thread(band_jpeg, frame_jpeg, 55, band_h)
         if jpeg is None:
             return None
-        _band_cache["ts"] = ts
-        _band_cache["jpeg"] = jpeg
-    return _band_cache["jpeg"]  # type: ignore[return-value]
+        _band_cache[key] = jpeg
+        if len(_band_cache) > 8:  # 只留最近几帧
+            for k in sorted(_band_cache)[: len(_band_cache) - 8]:
+                del _band_cache[k]
+    return _band_cache[key]
 
 
 class UdpLivePush:
@@ -63,8 +68,8 @@ class UdpLivePush:
         self._task: asyncio.Task[None] | None = None
         self._sock: socket.socket | None = None
 
-    def register(self, host: str, port: int, ttl_s: float = 60.0) -> None:
-        self.targets[(host, port)] = time.time() + ttl_s
+    def register(self, host: str, port: int, ttl_s: float = 60.0, band_h: int = 200) -> None:
+        self.targets[(host, port)] = (time.time() + ttl_s, band_h)
         log.info("udp live target registered: %s:%d (ttl %.0fs)", host, port, ttl_s)
 
     async def start(self) -> None:
@@ -87,20 +92,20 @@ class UdpLivePush:
         seq = 0
         while True:
             now = time.time()
-            expired = [k for k, v in self.targets.items() if v <= now]
+            expired = [k for k, (exp, _) in self.targets.items() if exp <= now]
             for k in expired:
                 log.info("udp live target expired: %s:%d", *k)
                 del self.targets[k]
             if self.targets:
                 for frame in self.ring.frames_since(last_ts):  # 全量新帧，不合并
-                    jpeg = await get_band_jpeg(frame.jpeg, frame.ts)
-                    if not jpeg:
-                        continue
-                    last_ts = frame.ts
-                    seq += 1
-                    chunks = [jpeg[i : i + UDP_CHUNK] for i in range(0, len(jpeg), UDP_CHUNK)]
-                    count = len(chunks)
-                    for host, port in list(self.targets):
+                    for (host, port), (_, band_h) in list(self.targets.items()):
+                        jpeg = await get_band_jpeg(frame.jpeg, frame.ts, band_h)
+                        if not jpeg:
+                            continue
+                        last_ts = frame.ts
+                        seq += 1
+                        chunks = [jpeg[i : i + UDP_CHUNK] for i in range(0, len(jpeg), UDP_CHUNK)]
+                        count = len(chunks)
                         for ci, payload in enumerate(chunks):
                             self._sock.sendto(  # type: ignore[union-attr]
                                 struct.pack(HDR_FMT, seq, ci, count) + payload, (host, port)

@@ -18,10 +18,6 @@ void ui_cmd_cat_unknown(int event_id);
 void ui_cmd_event_discarded(int event_id);
 void ui_cmd_set_offline(bool offline, const char *reason);
 
-// ---- 直播画面尺寸（上半屏）----
+// ---- 直播画面尺寸（视频带 y=56..256，480x200）----
 #define LIVE_W 480
-#define LIVE_H 240
-
-// 视频带排除区（闪烁修复）：直推挖洞跳过这些矩形（时钟/状态点），
-// LVGL 只在文本变化时重绘它们。直推调用：取第 i 个排除矩形，返回 false=没有更多。
-bool ui_video_excl(int i, int *x1, int *y1, int *x2, int *y2);
+#define LIVE_H 200

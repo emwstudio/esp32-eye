@@ -46,8 +46,9 @@ uint16_t *bsp_video_stage_buf() {
 }
 
 static uint32_t flush_total_us = 0, flush_count = 0;
-static volatile uint32_t flush_video_cnt = 0;  // 落在视频带（y<240）的 flush 次数
-#define LIVE_BAND_H 240
+static volatile uint32_t flush_video_cnt = 0;  // 落在视频带（y=56..256）的 flush 次数
+#define LIVE_BAND_Y0 56
+#define LIVE_BAND_Y1 256
 
 void bsp_flush_stats(uint32_t *total_us, uint32_t *count) {
   *total_us = flush_total_us;
@@ -73,7 +74,7 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t
   flush_total_us += (uint32_t)(esp_timer_get_time() - t0);
   flush_count++;
   // 诊断：LVGL 画到视频带（y<240）的次数——直播直推期该值应≈0（闪烁排查）
-  if (area->y1 < LIVE_BAND_H) flush_video_cnt++;
+  if (area->y1 >= LIVE_BAND_Y0 && area->y1 < LIVE_BAND_Y1) flush_video_cnt++;
 }
 
 static void lvgl_tick_cb(void *arg) { lv_tick_inc(LVGL_TICK_PERIOD_MS); }

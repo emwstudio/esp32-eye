@@ -53,7 +53,7 @@ async def test_udp_push_reassembles_frame():
         payload = b"".join(chunks[i] for i in range(count))
         assert payload[:2] == b"\xff\xd8" and payload[-2:] == b"\xff\xd9"
         img = Image.open(io.BytesIO(payload))
-        assert img.size == (480, 240)  # 直播带尺寸
+        assert img.size == (480, 200)  # 直播带尺寸（标题栏布局后为 200 高）
     finally:
         await push.stop()
         rx.close()
