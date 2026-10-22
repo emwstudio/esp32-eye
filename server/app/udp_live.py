@@ -48,15 +48,19 @@ _band_cache: dict[tuple[float, int], bytes] = {}
 
 async def get_band_jpeg(frame_jpeg: bytes, ts: float, band_h: int = 240) -> bytes | None:
     key = (ts, band_h)
-    if key not in _band_cache:
-        jpeg = await asyncio.to_thread(band_jpeg, frame_jpeg, 55, band_h)
-        if jpeg is None:
-            return None
-        _band_cache[key] = jpeg
-        if len(_band_cache) > 8:  # 只留最近几帧
-            for k in sorted(_band_cache)[: len(_band_cache) - 8]:
-                del _band_cache[k]
-    return _band_cache[key]
+    if key in _band_cache:
+        return _band_cache[key]
+    jpeg = await asyncio.to_thread(band_jpeg, frame_jpeg, 55, band_h)
+    if jpeg is None:
+        return None
+    # 缓存只作优化：先裁剪再插入，返回本地变量，乱序到达的迟帧也不会 KeyError
+    while len(_band_cache) >= 8:
+        oldest = min(_band_cache)
+        if oldest == key:
+            break
+        del _band_cache[oldest]
+    _band_cache[key] = jpeg
+    return jpeg
 
 
 class UdpLivePush:

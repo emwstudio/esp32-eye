@@ -75,9 +75,14 @@ class Storage:
                 )
                 avatar = sub / "avatar.jpg"
                 avatar_path = avatar if avatar.exists() else (images[0] if images else None)
+                # 可选 name.txt 提供中文显示名（缺省用目录名）
+                name_file = sub / "name.txt"
+                display_name = sub.name
+                if name_file.exists():
+                    display_name = name_file.read_text(encoding="utf-8").strip() or sub.name
                 self._conn.execute(
                     "INSERT OR REPLACE INTO cats (id, name, avatar_path) VALUES (?, ?, ?)",
-                    (sub.name, sub.name, str(avatar_path) if avatar_path else None),
+                    (sub.name, display_name, str(avatar_path) if avatar_path else None),
                 )
             count = self._conn.execute("SELECT COUNT(*) FROM cats").fetchone()[0]
             log.info("cats scanned: %d", count)

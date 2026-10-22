@@ -137,9 +137,10 @@ static void decode_fn(void *arg) {
       pool_put(jpeg_free, it.idx);
       continue;
     }
-    // 帧完整性校验：畸形帧会把 JPEGDEC 卡进病态解码（>5s）→ task_wdt 复位（真机黑屏根因）
+    // 帧完整性校验：畸形帧会把 JPEGDEC 卡进病态解码（>5s）→ task_wdt 复位（真机黑屏根因）。
+    // 注意长度下限不能按 TCP 时代帧大小校准（UDP q55 帧只有 ~3.4KB，曾被 >4096 全灭）。
     uint8_t *jb = jpeg_bufs[it.idx];
-    bool frame_ok = it.len > 4096 && it.len < 400 * 1024 &&
+    bool frame_ok = it.len > 200 && it.len < 400 * 1024 &&
                     jb[0] == 0xFF && jb[1] == 0xD8 &&
                     jb[it.len - 2] == 0xFF && jb[it.len - 1] == 0xD9;
     if (!frame_ok) {

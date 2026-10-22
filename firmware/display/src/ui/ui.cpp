@@ -120,14 +120,23 @@ static void banner_set_unknown() {
 }
 
 // ---------- 猫卡片动画 ----------
+// 每猫主题色（按 cat_id 映射，未知猫用默认绿）
+static lv_color_t theme_color(const String &id) {
+  if (id == "baobao") return lv_color_hex(0xf4a7b9);   // 粉
+  if (id == "bobo") return lv_color_hex(0x6cb5f5);     // 蓝
+  if (id == "qiuqiu") return lv_color_hex(0xb39ddb);   // 紫
+  if (id == "shandian") return lv_color_hex(0xffd54f); // 黄
+  return lv_color_hex(0x3fb27f);
+}
+
 static void card_pulse_cb(void *obj, int32_t v) {
   // v: 0..100 → 边框宽度 2..6 呼吸
   lv_obj_set_style_border_width((lv_obj_t *)obj, 2 + (v * 4) / 100, 0);
   lv_obj_set_style_border_opa((lv_obj_t *)obj, LV_OPA_40 + (v * (LV_OPA_COVER - LV_OPA_40)) / 100, 0);
 }
 
-static void card_pulse(lv_obj_t *card) {
-  lv_obj_set_style_border_color(card, lv_color_hex(0x3fb27f), 0);
+static void card_pulse(lv_obj_t *card, lv_color_t color) {
+  lv_obj_set_style_border_color(card, color, 0);
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, card);
@@ -144,14 +153,40 @@ static void count_bounce_cb(void *obj, int32_t v) {
 }
 
 static void count_bounce(lv_obj_t *lbl) {
+  // 大号数字常态 zoom=384（1.5x），弹跳冲到 512（2x）再回弹
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, lbl);
   lv_anim_set_exec_cb(&a, count_bounce_cb);
-  lv_anim_set_values(&a, 256, 384);  // 1.0x → 1.5x → 回弹
+  lv_anim_set_values(&a, 384, 512);
   lv_anim_set_time(&a, 180);
   lv_anim_set_playback_time(&a, 220);
   lv_anim_set_repeat_count(&a, 1);
+  lv_anim_start(&a);
+}
+
+// 进度条动画（计数变化时过渡）
+static lv_obj_t *cat_bars[4];
+static int bar_val[4] = {0, 0, 0, 0};
+
+static void bar_anim_cb(void *obj, int32_t v) {
+  for (int i = 0; i < 4; i++) {
+    if (cat_bars[i] == (lv_obj_t *)obj) {
+      bar_val[i] = v;
+      break;
+    }
+  }
+  lv_bar_set_value((lv_obj_t *)obj, v, LV_ANIM_OFF);
+}
+
+static void bar_set_animated(int i, int value) {
+  lv_anim_del(cat_bars[i], bar_anim_cb);  // 重启同对象动画，避免叠加
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, cat_bars[i]);
+  lv_anim_set_exec_cb(&a, bar_anim_cb);
+  lv_anim_set_values(&a, bar_val[i], value);
+  lv_anim_set_time(&a, 350);
   lv_anim_start(&a);
 }
 
@@ -171,12 +206,14 @@ static void banner_set_confirmed(const String &cat_id) {
   }
   xSemaphoreGive(state_mutex);
   if (idx >= 0) {
-    card_pulse(cat_cards[idx]);
+    card_pulse(cat_cards[idx], theme_color(cat_id));
     count_bounce(cat_counts[idx]);
   }
 }
 
 // ---------- 猫卡片 ----------
+#define DAILY_GOAL 8  // 每日目标次数（进度条满格）
+
 static void refresh_cards() {
   xSemaphoreTake(state_mutex, portMAX_DELAY);
   int n = (int)g_state.cats.size();
@@ -198,10 +235,17 @@ static void refresh_cards() {
   for (int i = 0; i < 4; i++) {
     if (i < n) {
       lv_obj_clear_flag(cat_cards[i], LV_OBJ_FLAG_HIDDEN);
+      lv_color_t theme = theme_color(ids[i]);
       lv_label_set_text(cat_names[i], names[i].c_str());
-      char b[16];
-      snprintf(b, sizeof(b), "%d 次", counts[i]);
+      char b[8];
+      snprintf(b, sizeof(b), "%d", counts[i]);
       lv_label_set_text(cat_counts[i], b);
+      // 头像圆环主题色（卡片边框维持极淡底色，脉冲时才上主题色）
+      lv_obj_set_style_border_color(lv_obj_get_parent(cat_imgs[i]), theme, 0);
+      // 进度条：主题色填充，达标（满格）换金色
+      int v = counts[i] > DAILY_GOAL ? DAILY_GOAL : counts[i];
+      lv_obj_set_style_bg_color(cat_bars[i], counts[i] >= DAILY_GOAL ? lv_color_hex(0xffd700) : theme, LV_PART_INDICATOR);
+      if (v != bar_val[i]) bar_set_animated(i, v);
       void *dsc = avatar_img_dsc(ids[i]);
       if (dsc) {
         lv_img_set_src(cat_imgs[i], dsc);
@@ -269,20 +313,20 @@ static void build_main() {
   banner_lbl = make_label(banner, "");
   lv_obj_center(banner_lbl);
 
-  // 猫卡片区：2x2（每格 240x112）
+  // 猫卡片区：2x2（每格 240x112，卡片 236x108）
   for (int i = 0; i < 4; i++) {
     lv_obj_t *card = lv_obj_create(scr_main);
     cat_cards[i] = card;
     lv_obj_set_size(card, 236, 108);
     lv_obj_set_pos(card, (i % 2) * 240 + 2, 234 + (i / 2) * 112 + 2);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x181d23), 0);
-    lv_obj_set_style_radius(card, 14, 0);
-    lv_obj_set_style_border_width(card, 2, 0);
-    lv_obj_set_style_border_color(card, lv_color_hex(0x2a2f36), 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1a1f26), 0);
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x262d36), 0);  // 极淡边框
     lv_obj_set_style_pad_all(card, 0, 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-    // 左：88px 圆形头像
+    // 左：88px 圆形头像（圆环主题色在 refresh_cards 按猫设置）
     lv_obj_t *circle = lv_obj_create(card);
     lv_obj_set_size(circle, 88, 88);
     lv_obj_align(circle, LV_ALIGN_LEFT_MID, 8, 0);
@@ -299,12 +343,29 @@ static void build_main() {
     lv_obj_center(cat_imgs[i]);
     lv_obj_add_flag(cat_imgs[i], LV_OBJ_FLAG_HIDDEN);
 
-    // 右上：名字；右下：次数
+    // 右上：名字
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 104, 18);
-    cat_counts[i] = make_label(card, "0 次");
-    lv_obj_set_pos(cat_counts[i], 104, 54);
-    lv_obj_set_style_text_color(cat_counts[i], lv_color_hex(0x9fd3b8), 0);
+    lv_obj_set_pos(cat_names[i], 102, 8);
+
+    // 右中：小字"今日" + 大号次数数字（transform_zoom 1.5x）
+    lv_obj_t *today = make_label(card, "今日");
+    lv_obj_set_pos(today, 102, 44);
+    lv_obj_set_style_text_color(today, lv_color_hex(0x8a93a0), 0);
+    cat_counts[i] = make_label(card, "0");
+    lv_obj_set_pos(cat_counts[i], 150, 36);
+    lv_obj_set_style_transform_zoom(cat_counts[i], 384, 0);  // 20px -> 30px
+
+    // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
+    lv_obj_t *bar = lv_bar_create(card);
+    cat_bars[i] = bar;
+    lv_obj_set_size(bar, 124, 8);
+    lv_obj_set_pos(bar, 102, 92);
+    lv_bar_set_range(bar, 0, DAILY_GOAL);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(bar, 4, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x262d36), 0);
+    lv_obj_set_style_radius(bar, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x3fb27f), LV_PART_INDICATOR);
   }
 
   home_empty = make_label(scr_main, "等待猫咪档案…");
