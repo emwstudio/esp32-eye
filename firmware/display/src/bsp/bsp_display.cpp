@@ -38,16 +38,7 @@ static void lvgl_rounder_cb(lv_disp_drv_t *disp_drv, lv_area_t *area) {
   if (area->y2 % 2 == 0) area->y2++;
 }
 
-static uint16_t *rot_buf = nullptr;  // 旋转转置缓冲（内部 DMA RAM，PSRAM 过不了 SPI DMA）
-
-// flush 耗时统计（帧率优化打点）
-static volatile uint32_t flush_total_us = 0, flush_count = 0;
-void bsp_flush_stats(uint32_t *total_us, uint32_t *count) {
-  *total_us = flush_total_us;
-  *count = flush_count;
-  flush_total_us = 0;
-  flush_count = 0;
-}
+static uint16_t *rot_buf = nullptr;  // 直播直推 staging 缓冲
 
 // 直播直推与 LVGL flush 共享 rot_buf（双方都在 lv_lock 内使用，互斥）
 uint16_t *bsp_video_stage_buf() {
@@ -55,22 +46,21 @@ uint16_t *bsp_video_stage_buf() {
   return rot_buf;
 }
 
+static uint32_t flush_total_us = 0, flush_count = 0;
+
+void bsp_flush_stats(uint32_t *total_us, uint32_t *count) {
+  *total_us = flush_total_us;
+  *count = flush_count;
+  flush_total_us = 0;
+  flush_count = 0;
+}
+
 static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
   int64_t t0 = esp_timer_get_time();
   uint32_t w = (area->x2 - area->x1 + 1);
   uint32_t h = (area->y2 - area->y1 + 1);
-  // 面板原生方向与桌面摆放差 90°，CO5300 又不支持 90° 硬件旋转：
-  // 手工把每个块转置——逻辑像素 (x,y) → 面板 (x'=y, y'=479-x)，块 (w×h) → (h×w)
-  if (!rot_buf) rot_buf = (uint16_t *)heap_caps_malloc(LCD_WIDTH * LCD_HEIGHT / 20 * 2, MALLOC_CAP_DMA);
-  const uint16_t *src = (const uint16_t *)color_p;
-  uint32_t w1 = w - 1;
-  for (uint32_t i = 0; i < w; i++) {          // 目标行 = area->x2 - x_l
-    uint32_t src_col = w1 - i;                // 源列（从右往左）
-    for (uint32_t j = 0; j < h; j++) {        // 目标列 = y_l - area->y1
-      rot_buf[i * h + j] = src[j * w + src_col];
-    }
-  }
-  gfx->draw16bitRGBBitmap(area->y1, LCD_HEIGHT - 1 - area->x2, rot_buf, h, w);
+  // 面板原生方向（设备侧放）：直接写屏，无转置开销
+  gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
   lv_disp_flush_ready(disp);
   flush_total_us += (uint32_t)(esp_timer_get_time() - t0);
   flush_count++;
@@ -79,17 +69,12 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t
 static void lvgl_tick_cb(void *arg) { lv_tick_inc(LVGL_TICK_PERIOD_MS); }
 
 static void touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
-  // CST9220 最终版读法（实测校准）：
-  // - 按下/抬起用 INT 引脚电平（isPressed）——抬起检测可靠
-  // - 坐标在芯片有新报告时（getPoint 返回 n>0）才更新，无新数据时保持——
-  //   芯片缓冲间歇性就绪，把"无新数据"当作"抬起"会造成状态抖动
-  // 注：单页仪表盘无触摸交互，本函数仅保留诊断打点
+  // 面板原生方向（设备侧放）：官方直通映射，坐标即驱动输出
   static int lx = -1, ly = -1;
   bool pressed = touch.isPressed();
   uint8_t touched = touch.getPoint(touch_x, touch_y, touch.getSupportTouchPoint());
   if (touched) {
-    // 实测标定：驱动坐标 → 屏幕逻辑坐标只需 X 镜像（物理左=tx 大值）
-    lx = LCD_WIDTH - 1 - touch_x[0];
+    lx = touch_x[0];
     ly = touch_y[0];
   }
   data->state = pressed ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
@@ -97,17 +82,15 @@ static void touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
     data->point.x = lx;
     data->point.y = ly;
   }
-  // 诊断：按下/抬手/拖动（变化 >20px）记录
   static lv_indev_state_t last = LV_INDEV_STATE_REL;
   static int last_x = -1, last_y = -1;
   bool trans = data->state != last;
   bool moved = data->state == LV_INDEV_STATE_PR &&
                (abs((int)data->point.x - last_x) > 20 || abs((int)data->point.y - last_y) > 20);
   if (trans || moved) {
-    rlogf("[TOUCH] %s log=%d,%d raw=%d,%d",
+    rlogf("[TOUCH] %s x=%d y=%d",
           data->state == LV_INDEV_STATE_PR ? (trans ? "DOWN" : "MOVE") : "UP",
-          (int)data->point.x, (int)data->point.y,
-          touched ? (int)touch_y[0] : -1, touched ? (int)touch_x[0] : -1);
+          (int)data->point.x, (int)data->point.y);
     last = data->state;
     last_x = data->point.x;
     last_y = data->point.y;

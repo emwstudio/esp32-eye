@@ -71,6 +71,7 @@ void rlog_init() {
   buf = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
   if (!buf) buf = (char *)malloc(4096);
   if (!buf) return;
+  memset(buf, 0, 4096);  // 避免未初始化字节被发进服务端日志
   mtx = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(rlog_fn, "rlog", 4096, NULL, 1, NULL, 0);
 }

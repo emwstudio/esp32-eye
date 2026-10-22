@@ -47,26 +47,18 @@ static int live_jpeg_draw(JPEGDRAW *d) {
   return 1;
 }
 
-// 逻辑帧转置直推屏幕上半带（逻辑 (x,y) → 面板 (x'=y, y'=479-x)，即 P[y'][x']=L[x'*480+479-y']）。
-// 按面板 48 行分块：对每块，源是 L 的 240 行中各连续 48px 段（PSRAM 友好），写内部 staging。
-// 与 LVGL flush 用 lv_lock 串行化（gfx 总线共享）；按块持锁，让 UI 在块间插空刷新。
+// 面板原生方向（设备侧放）：直接按 480×24 行块写屏。
+// staging 用 bsp_video_stage_buf()（内部 DMA RAM；SPI DMA 读不了 PSRAM，所以要拷一段）。
+// 分块仅为了持锁粒度——与 LVGL flush 共享 gfx 总线，让 UI 在块间插空刷新。
 static void push_video_frame(const uint16_t *logical_buf) {
-  uint16_t *stage = bsp_video_stage_buf();  // 240*48 px
+  uint16_t *stage = bsp_video_stage_buf();  // 240*48 px = 480*24 px
   if (!stage) return;
-  uint16_t tmp[PUSH_CHUNK_H];
-  for (int y0 = 0; y0 < LCD_HEIGHT; y0 += PUSH_CHUNK_H) {
-    for (int xp = 0; xp < 240; xp++) {  // x' = 逻辑 y
-      const uint16_t *src = logical_buf + (size_t)xp * LIVE_W + (LCD_HEIGHT - y0 - PUSH_CHUNK_H);
-      memcpy(tmp, src, PUSH_CHUNK_H * 2);  // 逻辑行内连续 48px
-      // 写到 staging：stage[yy*240+xp]，面板 y' = y0+yy 对应逻辑 x = 479-y0-yy → tmp 逆序
-      uint16_t *col = stage + xp;
-      for (int yy = 0; yy < PUSH_CHUNK_H; yy++) {
-        col[yy * 240] = tmp[PUSH_CHUNK_H - 1 - yy];
-      }
-    }
+  const int CHUNK = 24;
+  for (int y0 = 0; y0 < LIVE_H; y0 += CHUNK) {
+    memcpy(stage, logical_buf + (size_t)y0 * LIVE_W, LIVE_W * CHUNK * 2);
     int64_t td = esp_timer_get_time();
     lv_lock();
-    gfx->draw16bitRGBBitmap(0, y0, stage, 240, PUSH_CHUNK_H);
+    gfx->draw16bitRGBBitmap(0, y0, stage, LIVE_W, CHUNK);
     lv_unlock();
     stat_draw_us += (uint32_t)(esp_timer_get_time() - td);
   }
