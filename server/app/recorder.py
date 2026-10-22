@@ -90,7 +90,8 @@ class Recorder:
                 pcm_path.write_bytes(bytes(pcm))
                 args += ["-f", "s16le", "-ar", str(AUDIO_RATE), "-ac", "1", "-i", str(pcm_path)]
 
-            args += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+            # CRF 18 + medium：接近无损地保留源 JPEG 帧细节（默认 CRF23 会再糊一档）
+            args += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
             if pcm_path is not None:
                 args += ["-c:a", "aac", "-shortest"]
             args.append(str(out_path))

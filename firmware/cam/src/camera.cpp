@@ -49,8 +49,8 @@ static bool camHwInit() {
   config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = CAM_XCLK_HZ;
   config.pixel_format = PIXFORMAT_JPEG;  // OV5640 on-chip JPEG
-  config.frame_size = FRAMESIZE_SVGA;    // 800x600 default stream size
-  config.jpeg_quality = 12;
+  config.frame_size = FRAMESIZE_XGA;      // 1024x768（画质优先，实测带宽影响）
+  config.jpeg_quality = 8;         // 数值越小画质越好（0-63）
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
