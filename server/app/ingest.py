@@ -82,8 +82,8 @@ class CamIngest:
     def start(self) -> None:
         base = self.settings.cam_base_url.rstrip("/")
         self._tasks = [
-            asyncio.create_task(self._video_loop(resolve_local_host(f"{base}/stream"))),
-            asyncio.create_task(self._audio_loop(resolve_local_host(self.settings.audio_ws_url()))),
+            asyncio.create_task(self._video_loop(f"{base}/stream")),
+            asyncio.create_task(self._audio_loop(self.settings.audio_ws_url())),
         ]
 
     async def stop(self) -> None:
@@ -99,7 +99,7 @@ class CamIngest:
         backoff = BACKOFF_MIN
         while True:
             try:
-                await self._pull_mjpeg(url)
+                await self._pull_mjpeg(resolve_local_host(url))  # 每次重试前重新解析（换网/IP 变化自愈）
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -139,7 +139,7 @@ class CamIngest:
         backoff = BACKOFF_MIN
         while True:
             try:
-                async with websockets.connect(url, max_size=None, compression=None) as ws:
+                async with websockets.connect(resolve_local_host(url), max_size=None, compression=None) as ws:
                     self.audio_connected = True
                     self._device_ts_warned = False  # 每次重连后重新判定 NTP 同步
                     log.info("cam audio stream connected: %s", url)

@@ -7,35 +7,89 @@
 #include "bsp/bsp_display.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <AsyncUDP.h>
 #include <JPEGDEC.h>
 
-static TaskHandle_t video_task = NULL, audio_task = NULL, push_task = NULL, decode_task = NULL;
+// ---- 直播管线（12fps 目标版）----
+// 两条 /api/live_band 连接并行收帧（服务端 band_cache 共享编码，双连接投递绕过
+// 单连接 yield 阻塞 + sleep(100ms) 的 ~9.6fps 上限与 TCP 投递折损）；
+// 内容哈希去重（两连接送同一帧序列）→ JPEG 缓冲池队列 → 两个独立 JPEGDEC 实例
+// （core0/core1 各一，JPEGDEC 非线程安全故完全独立）→ 帧序号有序直推（core1）。
+
+#define N_VIDEO_CONNS 1  // 双连接实测无效（两连接交付完全同步，去重后零增益，见 README）
+#define N_JPEG_BUFS 4
+#define N_BUFS 4
+#define JPEG_CAP (300 * 1024)
+
+static TaskHandle_t reader_tasks[N_VIDEO_CONNS] = {};
+static TaskHandle_t decode_tasks[2] = {NULL, NULL};
+static TaskHandle_t push_task = NULL, audio_task = NULL, udp_task = NULL;
 static volatile bool live_running = false;
-static JPEGDEC jpg;
-// 活动流指针，供 live_stop 从外部 stop() 唤醒阻塞读
-static WiFiClient *live_video_stream = NULL;
+static volatile bool tcp_active = false;  // UDP 断流时的 TCP 回退开关
+static WiFiClient *live_video_streams[N_VIDEO_CONNS] = {};
 static WiFiClient *live_audio_stream = NULL;
 
-// ---- 解码/直推流水线 ----
-// 逻辑方向帧缓冲 x3（行优先 memcpy，解码最快）。解码任务（core0）与直推任务（core1）
-// 通过信箱（ready/pushing 索引 + 信号量）重叠：实测串行管线 decode 68ms + push 49ms +
-// gap 100ms+ 只有 ~4fps；流水化后帧周期 ≈ max(decode, push)。
-// 直推按行段块转置（L 行内连续读 48px，写内部 staging 跨步——内部 RAM 跨步廉价），
-// 避免 PSRAM 跨步写（实测会让解码耗时翻倍）。
-#define N_BUFS 3
-static uint16_t *logical_bufs[N_BUFS] = {NULL, NULL, NULL};  // PSRAM 480x240 逻辑方向
-static SemaphoreHandle_t buf_mutex = NULL;
-static SemaphoreHandle_t push_sem = NULL;
-static volatile int ready_idx = -1;    // 已解码待直推
-static volatile int pushing_idx = -1;  // 正在直推
-// push staging 用 bsp_video_stage_buf()（与 LVGL flush 共享 rot_buf，省 23KB 内部 RAM）
-#define PUSH_CHUNK_H 48
+// ---- 缓冲池（全部 PSRAM）----
+static uint16_t *logical_bufs[N_BUFS] = {NULL, NULL, NULL, NULL};  // 480x240 RGB565
+static uint8_t *jpeg_bufs[N_JPEG_BUFS] = {NULL, NULL, NULL, NULL};
+static volatile bool jpeg_free[N_JPEG_BUFS] = {true, true, true, true};
+static volatile bool logical_free[N_BUFS] = {true, true, true, true};
+static SemaphoreHandle_t pool_mutex = NULL;
 
-static uint32_t stat_draw_us = 0;   // 直推中 gfx DMA 耗时
-static uint32_t stat_drops = 0;     // 无空闲缓冲而丢弃的帧
+struct JpegItem { int idx; uint32_t seq; size_t len; };
+struct DecItem { int idx; uint32_t seq; };
+static QueueHandle_t jpeg_q = NULL;  // reader → decoders
+static QueueHandle_t dec_q = NULL;   // decoders → push
 
+// ---- 去重（两连接送同一帧序列）----
+static uint32_t recent_hashes[6] = {0};
+static volatile uint32_t seq_next = 0;
+static uint32_t stat_dup = 0, stat_drops = 0;
+static uint32_t stat_draw_us = 0;
+
+static uint32_t frame_hash(const uint8_t *d, size_t n) {
+  // 采样哈希：长度 + 头/中/尾各 16 字节
+  uint32_t h = (uint32_t)n * 2654435761u;
+  size_t pts[3] = {0, n / 2, n - 16};
+  for (int p = 0; p < 3; p++) {
+    for (int i = 0; i < 16 && pts[p] + i < n; i++) h = h * 31 + d[pts[p] + i];
+  }
+  return h;
+}
+
+static bool seen_recently(uint32_t h) {
+  for (int i = 0; i < 6; i++) {
+    if (recent_hashes[i] == h) return true;
+  }
+  return false;
+}
+static void mark_seen(uint32_t h) {
+  memmove(&recent_hashes[1], &recent_hashes[0], sizeof(recent_hashes) - 4);
+  recent_hashes[0] = h;
+}
+
+static int pool_take(volatile bool *free_flags, int n) {
+  int r = -1;
+  xSemaphoreTake(pool_mutex, portMAX_DELAY);
+  for (int i = 0; i < n; i++) {
+    if (free_flags[i]) {
+      free_flags[i] = false;
+      r = i;
+      break;
+    }
+  }
+  xSemaphoreGive(pool_mutex);
+  return r;
+}
+static void pool_put(volatile bool *free_flags, int idx) {
+  xSemaphoreTake(pool_mutex, portMAX_DELAY);
+  free_flags[idx] = true;
+  xSemaphoreGive(pool_mutex);
+}
+
+// ---- 解码 ----
 static int live_jpeg_draw(JPEGDRAW *d) {
-  uint16_t *dst = (uint16_t *)d->pUser;  // logical bufs
+  uint16_t *dst = (uint16_t *)d->pUser;
   if (!dst) return 0;
   for (int y = 0; y < d->iHeight; y++) {
     int dy = d->y + y;
@@ -47,21 +101,58 @@ static int live_jpeg_draw(JPEGDRAW *d) {
   return 1;
 }
 
-// 面板原生方向（设备侧放）：直接按 480×24 行块写屏。
-// staging 用 bsp_video_stage_buf()（内部 DMA RAM；SPI DMA 读不了 PSRAM，所以要拷一段）。
-// 分块仅为了持锁粒度——与 LVGL flush 共享 gfx 总线，让 UI 在块间插空刷新。
-static void push_video_frame(const uint16_t *logical_buf) {
-  uint16_t *stage = bsp_video_stage_buf();  // 240*48 px = 480*24 px
-  if (!stage) {
-    static uint32_t last_log = 0;
-    if (millis() - last_log > 5000) {  // 限频，防日志刷屏
-      last_log = millis();
-      rlogf("[LIVE] push: stage 缓冲分配失败（内部 RAM 不足），heap=%u", (unsigned)xPortGetFreeHeapSize());
+// 帧计时打点
+static uint32_t stat_decode_us[2] = {0, 0}, stat_decode_n[2] = {0, 0}, stat_push_us = 0, stat_frames = 0;
+static int64_t stat_window_start = 0;
+static void stat_tick();  // 前向声明
+
+static void decode_fn(void *arg) {
+  int core_id = (int)(intptr_t)arg;
+  // JPEGDEC 内嵌约 20KB 的 JPEGIMAGE（Huffman 表等）：静态内部 RAM 实例
+  // （放任务栈会爆栈；放 PSRAM 解码慢 3 倍——实测 150ms→55ms）。每个解码核一个
+  // 独立实例（JPEGDEC 非线程安全）。LV_MEM_SIZE 已降到 32KB 腾出空间。
+  static JPEGDEC jpg_inst[2];
+  JPEGDEC &jpg = jpg_inst[core_id];
+  uint32_t last_hb = 0;
+  while (live_running) {
+    if (millis() - last_hb > 5000) {  // 存活性心跳：确认双解码核都在轮询队列
+      last_hb = millis();
+      rlogf("[DEC%d] alive, jpeg_q depth=%u", core_id, (unsigned)uxQueueMessagesWaiting(jpeg_q));
     }
-    return;
+    JpegItem it;
+    if (xQueueReceive(jpeg_q, &it, pdMS_TO_TICKS(200)) != pdTRUE) continue;
+    if (it.idx < 0) continue;  // live_stop 的唤醒哨兵
+    int64_t t_wait0 = esp_timer_get_time();
+    int lidx = pool_take(logical_free, N_BUFS);
+    if (lidx < 0) {  // 逻辑缓冲全忙：丢帧
+      stat_drops++;
+      pool_put(jpeg_free, it.idx);
+      continue;
+    }
+    if (!jpg.openRAM(jpeg_bufs[it.idx], it.len, live_jpeg_draw)) {
+      pool_put(jpeg_free, it.idx);
+      pool_put(logical_free, lidx);
+      continue;
+    }
+    jpg.setUserPointer(logical_bufs[lidx]);
+    jpg.setPixelType(RGB565_LITTLE_ENDIAN);
+    jpg.decode(0, 0, 0);
+    jpg.close();
+    pool_put(jpeg_free, it.idx);
+    int64_t t1 = esp_timer_get_time();
+    stat_decode_us[core_id] += (uint32_t)(t1 - t_wait0);
+    stat_decode_n[core_id]++;
+    DecItem di{lidx, it.seq};
+    xQueueSend(dec_q, &di, pdMS_TO_TICKS(50));
   }
-  static bool first_push = true;
-  if (first_push) { first_push = false; rlogf("[LIVE] 首次直推成功"); }
+  decode_tasks[core_id] = NULL;
+  vTaskDelete(NULL);
+}
+
+// ---- 直推（面板原生方向，480×24 行块；分块仅为持锁粒度让 UI 插空）----
+static void push_video_frame(const uint16_t *logical_buf) {
+  uint16_t *stage = bsp_video_stage_buf();  // 480*24 px，内部 DMA RAM
+  if (!stage) return;
   const int CHUNK = 24;
   for (int y0 = 0; y0 < LIVE_H; y0 += CHUNK) {
     memcpy(stage, logical_buf + (size_t)y0 * LIVE_W, LIVE_W * CHUNK * 2);
@@ -77,149 +168,187 @@ static void push_video_frame(const uint16_t *logical_buf) {
   lv_unlock();
 }
 
-// 帧计时打点（优化瓶颈定位）
-static uint32_t stat_decode_us = 0, stat_push_us = 0, stat_frames = 0;
-static uint32_t stat_gap_us = 0;        // 解码任务空闲（等 JPEG 帧，≈ 服务端/源限速）
-static int64_t stat_last_decode_end = 0;
-static int64_t stat_window_start = 0;
-
-// ---- JPEG 信箱（reader → decoder 流水）----
-#define N_JPEG_BUFS 2
-static uint8_t *jpeg_bufs[N_JPEG_BUFS] = {NULL, NULL};
-static size_t jpeg_lens[N_JPEG_BUFS] = {0, 0};
-static volatile int jpeg_ready = -1, jpeg_using = -1;
-static SemaphoreHandle_t jpeg_sem = NULL;
-
-// 选一个空闲 JPEG 缓冲；无则丢帧
-static int pick_free_jpeg() {
-  int free_idx = -1;
-  xSemaphoreTake(buf_mutex, portMAX_DELAY);
-  for (int i = 0; i < N_JPEG_BUFS; i++) {
-    if (i != jpeg_ready && i != jpeg_using) { free_idx = i; break; }
-  }
-  xSemaphoreGive(buf_mutex);
-  return free_idx;
-}
-
-// 选一个空闲缓冲：不在直推、不是最新待推。无空闲返回 -1（丢帧）
-static int pick_free_buf() {
-  int free_idx = -1;
-  xSemaphoreTake(buf_mutex, portMAX_DELAY);
-  for (int i = 0; i < N_BUFS; i++) {
-    if (i != ready_idx && i != pushing_idx) { free_idx = i; break; }
-  }
-  xSemaphoreGive(buf_mutex);
-  return free_idx;
-}
-
-static void decode_live(const uint8_t *jpeg, size_t len) {
-  int idx = pick_free_buf();
-  if (idx < 0) {
-    stat_drops++;
-    return;
-  }
-  if (!jpg.openRAM((uint8_t *)jpeg, len, live_jpeg_draw)) return;
-  jpg.setUserPointer(logical_bufs[idx]);
-  jpg.setPixelType(RGB565_LITTLE_ENDIAN);
-  jpg.decode(0, 0, 0);
-  jpg.close();
-  xSemaphoreTake(buf_mutex, portMAX_DELAY);
-  ready_idx = idx;  // 覆盖旧的待推帧（直播丢旧帧保新帧）
-  xSemaphoreGive(buf_mutex);
-  xSemaphoreGive(push_sem);
-}
-
-// 解码任务：从 JPEG 信箱取帧解码（与 reader/直推流水）
-static void decode_fn(void *) {
-  while (live_running) {
-    if (xSemaphoreTake(jpeg_sem, pdMS_TO_TICKS(500)) != pdTRUE) continue;
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    int j = jpeg_ready;
-    if (j >= 0) {
-      jpeg_ready = -1;
-      jpeg_using = j;
-    }
-    xSemaphoreGive(buf_mutex);
-    if (j < 0) continue;
-    int64_t t0 = esp_timer_get_time();
-    if (stat_last_decode_end) stat_gap_us += (uint32_t)(t0 - stat_last_decode_end);
-    decode_live(jpeg_bufs[j], jpeg_lens[j]);
-    stat_decode_us += (uint32_t)(esp_timer_get_time() - t0);
-    stat_last_decode_end = esp_timer_get_time();
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    jpeg_using = -1;
-    xSemaphoreGive(buf_mutex);
-  }
-  decode_task = NULL;
-  vTaskDelete(NULL);
-}
-
-// reader 收入一帧完整 JPEG（在抽取器缓冲里）：拷入信箱并唤醒解码任务
-static void reader_on_frame(const uint8_t *jpeg, size_t len) {
-  int j = pick_free_jpeg();
-  if (j < 0) {
-    stat_drops++;
-    return;
-  }
-  memcpy(jpeg_bufs[j], jpeg, len);
-  xSemaphoreTake(buf_mutex, portMAX_DELAY);
-  jpeg_lens[j] = len;
-  jpeg_ready = j;  // 覆盖旧帧
-  xSemaphoreGive(buf_mutex);
-  xSemaphoreGive(jpeg_sem);
-}
-
-// 直推任务（core 1）：取最新待推帧直推
-static void stat_tick();  // 前向声明（定义在下方）
-
+// 有序直推：pending 小表按 seq 归序，缺号超时跳过（直播丢帧保新）
 static void push_fn(void *) {
+  DecItem pending[8];
+  int pn = 0;
+  uint32_t expected = 0;
+  bool have_expected = false;
   while (live_running) {
-    if (xSemaphoreTake(push_sem, pdMS_TO_TICKS(500)) != pdTRUE) continue;
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    int idx = ready_idx;
-    if (idx >= 0) {
-      ready_idx = -1;
-      pushing_idx = idx;
+    DecItem di;
+    if (xQueueReceive(dec_q, &di, pdMS_TO_TICKS(80)) == pdTRUE) {
+      if (di.idx < 0) continue;  // live_stop 的唤醒哨兵
+      if (have_expected && (int32_t)(di.seq - expected) < 0) {
+        pool_put(logical_free, di.idx);  // 过期帧
+        stat_drops++;
+        continue;
+      }
+      if (pn < 8) pending[pn++] = di;
+      else {
+        pool_put(logical_free, di.idx);
+        stat_drops++;
+      }
     }
-    xSemaphoreGive(buf_mutex);
-    if (idx < 0) continue;
+    // 选最小 seq ≥ expected；没有则等待（队列空且 pending 里都是未来帧超过 80ms 就跳号）
+    int best = -1;
+    for (int i = 0; i < pn; i++) {
+      if (!have_expected || (int32_t)(pending[i].seq - expected) >= 0) {
+        if (best < 0 || (int32_t)(pending[i].seq - pending[best].seq) < 0) best = i;
+      }
+    }
+    if (best < 0) continue;
+    if (!have_expected) {
+      // 首帧直接定基
+    } else if (pending[best].seq != expected) {
+      // 期望号没到：若队列已空（收过一轮超时）就跳到最小可用号
+      if (uxQueueMessagesWaiting(dec_q) > 0) continue;
+    }
+    DecItem cur = pending[best];
+    pending[best] = pending[--pn];
+    have_expected = true;
+    expected = cur.seq + 1;
     int64_t t0 = esp_timer_get_time();
-    push_video_frame(logical_bufs[idx]);
+    push_video_frame(logical_bufs[cur.idx]);
     stat_push_us += (uint32_t)(esp_timer_get_time() - t0);
-    xSemaphoreTake(buf_mutex, portMAX_DELAY);
-    pushing_idx = -1;
-    xSemaphoreGive(buf_mutex);
+    pool_put(logical_free, cur.idx);
     stat_tick();
   }
   push_task = NULL;
   vTaskDelete(NULL);
 }
 
-// 每 30 帧打一次：解码均耗 / 直推均耗（含 DMA 拆分）/ 读取间隙 / LVGL flush 均耗 / 实测 fps / 丢帧
-static void stat_tick() {
-  if (++stat_frames < 30) return;
-  int64_t now = esp_timer_get_time();
-  float fps = stat_window_start ? 30.0f * 1e6f / (float)(now - stat_window_start) : 0;
-  uint32_t fus, fcnt;
-  bsp_flush_stats(&fus, &fcnt);
-  rlogf("[STAT] fps=%.1f decode=%ums push=%ums(draw%ums) gap=%ums drop=%u flush=%ums(n%u)",
-        fps, (unsigned)(stat_decode_us / 30 / 1000), (unsigned)(stat_push_us / 30 / 1000),
-        (unsigned)(stat_draw_us / 30 / 1000),
-        (unsigned)(stat_gap_us / 30 / 1000), (unsigned)stat_drops,
-        fcnt ? (unsigned)(fus / fcnt / 1000) : 0, (unsigned)fcnt);
-  stat_decode_us = 0;
-  stat_push_us = 0;
-  stat_gap_us = 0;
-  stat_draw_us = 0;
-  stat_drops = 0;
-  stat_frames = 0;
-  stat_window_start = now;
+// ---- UDP 直播接收（绕开 TCP 到 ESP32 的 ~5fps 投递瓶颈）----
+// 协议：GET /api/live_udp?port=5060 注册（TTL 60s，每 30s 续期）→ 服务端把分片推到
+// 设备 UDP 5060。报文：[seq u32 LE][idx u16 LE][cnt u16 LE][payload]，单片 ≤1400B。
+// 重组：只追最新 seq（旧 seq 直接丢），一帧 300ms 未齐丢弃；UDP 5s 无完整帧回退 TCP。
+#define UDP_PORT 5060
+#define UDP_RING_N 24
+#define UDP_PKT_MAX 1500
+#define UDP_REASM_TIMEOUT_MS 300
+#define UDP_FALLBACK_MS 5000
+
+static AsyncUDP udp;
+static uint8_t (*udp_ring)[UDP_PKT_MAX] = NULL;  // PSRAM 环形报文缓冲
+static uint16_t udp_ring_len[UDP_RING_N];
+static volatile int udp_head = 0, udp_tail = 0;
+static SemaphoreHandle_t udp_sem = NULL;
+
+static uint8_t *reasm = NULL;  // PSRAM JPEG_CAP 重组缓冲
+static bool reasm_active = false;
+static uint32_t reasm_seq = 0, reasm_t0 = 0, reasm_len = 0;
+static uint16_t reasm_count = 0, reasm_got = 0;
+static uint8_t reasm_bm[40];  // 最多 320 片
+
+static uint32_t stat_udp_frames = 0, stat_udp_frag_drop = 0, stat_udp_rx_drop = 0;
+static uint32_t last_udp_frame_ms = 0;
+
+// lwIP 回调上下文：只拷报文入环，绝不做重活
+static void on_udp_packet(AsyncUDPPacket &p) {
+  int next = (udp_head + 1) % UDP_RING_N;
+  if (next == udp_tail) {
+    stat_udp_rx_drop++;
+    return;
+  }
+  size_t n = p.length() > UDP_PKT_MAX ? UDP_PKT_MAX : p.length();
+  memcpy(udp_ring[udp_head], p.data(), n);
+  udp_ring_len[udp_head] = n;
+  udp_head = next;
+  xSemaphoreGive(udp_sem);
 }
 
-// MJPEG 帧抽取器：块读 + 内存扫描 JPEG SOI/EOI 标记。
-// 逐字节 WiFiClient::read() 会把 CPU0 打满饿死 IDLE0 触发任务看门狗（实测 22s 一重启），
-// 必须块读。feed 处理整块数据的所有字节，每凑齐一帧调一次 cb（一块里可能有多帧，
-// 提前 return 会丢掉 EOI 之后、下一帧 SOI 之前的字节而丢帧——实测正是 3.3fps 的一半帧率元凶）。
+static void reader_on_frame(const uint8_t *jpeg, size_t len);  // 前向声明
+static void live_video_fn(void *arg);                          // 前向声明（UDP 回退用）
+
+static void udp_process(const uint8_t *d, size_t n) {
+  if (n < 9) return;
+  uint32_t seq = d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t)d[3] << 24);
+  uint16_t idx = d[4] | (d[5] << 8);
+  uint16_t cnt = d[6] | (d[7] << 8);
+  const uint8_t *pl = d + 8;
+  size_t plen = n - 8;
+  if (cnt == 0 || cnt > 300 || idx >= cnt) return;
+  if (!reasm_active || seq != reasm_seq) {
+    if (reasm_active && (int32_t)(seq - reasm_seq) < 0) return;  // 旧帧迟到，丢
+    if (reasm_active) stat_udp_frag_drop++;  // 旧帧没齐就被新帧顶替
+    reasm_active = true;
+    reasm_seq = seq;
+    reasm_count = cnt;
+    reasm_got = 0;
+    reasm_len = 0;
+    reasm_t0 = millis();
+    memset(reasm_bm, 0, sizeof(reasm_bm));
+  }
+  if (reasm_bm[idx >> 3] & (1 << (idx & 7))) return;  // 重复片
+  size_t off = (size_t)idx * 1400;  // 契约：除末片外每片 1400B
+  if (off + plen > JPEG_CAP) {
+    reasm_active = false;
+    stat_udp_frag_drop++;
+    return;
+  }
+  memcpy(reasm + off, pl, plen);
+  reasm_bm[idx >> 3] |= (1 << (idx & 7));
+  reasm_got++;
+  if (off + plen > reasm_len) reasm_len = off + plen;
+  if (reasm_got == reasm_count) {
+    reasm_active = false;
+    stat_udp_frames++;
+    last_udp_frame_ms = millis();
+    if (tcp_active) {  // UDP 恢复，停 TCP 回退
+      tcp_active = false;
+      rlogf("[UDP] 帧恢复，停 TCP 回退");
+    }
+    reader_on_frame(reasm, reasm_len);
+  }
+}
+
+static void udp_register() {
+  HTTPClient http;
+  http.setTimeout(3000);
+  if (!http.begin(String(SERVER_BASE) + "/api/live_udp?port=5060")) return;
+  int code = http.GET();
+  rlogf("[UDP] register/renew -> %d", code);
+  http.end();
+}
+
+static void udp_fn(void *) {
+  udp_register();  // 启动即注册
+  uint32_t last_reg = millis();
+  if (!udp.listen(UDP_PORT)) {
+    rlogf("[UDP] listen %d failed", UDP_PORT);
+  }
+  udp.onPacket(on_udp_packet);
+  while (live_running) {
+    if (xSemaphoreTake(udp_sem, pdMS_TO_TICKS(50)) == pdTRUE) {
+      while (udp_tail != udp_head) {
+        udp_process(udp_ring[udp_tail], udp_ring_len[udp_tail]);
+        udp_tail = (udp_tail + 1) % UDP_RING_N;
+      }
+    }
+    // 帧重组超时清理
+    if (reasm_active && millis() - reasm_t0 > UDP_REASM_TIMEOUT_MS) {
+      reasm_active = false;
+      stat_udp_frag_drop++;
+    }
+    // 30s 续期
+    if (millis() - last_reg > 30000) {
+      last_reg = millis();
+      udp_register();
+    }
+    // UDP 断流回退 TCP
+    if (!tcp_active && millis() - last_udp_frame_ms > UDP_FALLBACK_MS) {
+      tcp_active = true;
+      BaseType_t r = xTaskCreatePinnedToCore(live_video_fn, "live_v0", 5120, (void *)0, 4, &reader_tasks[0], 0);
+      rlogf("[UDP] %ums 无完整帧，回退 TCP 拉流 r=%ld", (unsigned)UDP_FALLBACK_MS, (long)r);
+    }
+  }
+  udp.close();
+  udp_task = NULL;
+  vTaskDelete(NULL);
+}
+
+// ---- reader ----
+// MJPEG 帧抽取器：块读 + 内存扫描 SOI/EOI（必须块读——逐字节读曾打满 CPU0 饿死 IDLE0
+// 触发看门狗；必须处理整块所有帧——提前 return 丢块尾会腰斩帧率）。
 struct MjpegExtractor {
   uint8_t *buf;
   size_t cap;
@@ -229,7 +358,6 @@ struct MjpegExtractor {
 
   void init(uint8_t *b, size_t c) { buf = b; cap = c; }
 
-  // 喂入一块数据，每凑齐一帧回调一次 cb(buf, len)
   template <typename F>
   void feed(const uint8_t *data, size_t n, F cb) {
     for (size_t k = 0; k < n; k++) {
@@ -243,7 +371,7 @@ struct MjpegExtractor {
         }
         prev = b;
       } else {
-        if (len >= cap) {  // 帧超容：丢弃并重新找 SOI
+        if (len >= cap) {
           in_frame = false;
           prev = -1;
           len = 0;
@@ -263,69 +391,105 @@ struct MjpegExtractor {
   }
 };
 
-static void live_video_fn(void *) {
-  const size_t CAP = 400 * 1024;
-  uint8_t *jpeg = (uint8_t *)heap_caps_malloc(CAP, MALLOC_CAP_SPIRAM);
-  uint8_t *rx = (uint8_t *)malloc(8192);
+// reader 收到完整帧：去重 → 拷入 JPEG 缓冲池 → 入解码队列
+static void reader_on_frame(const uint8_t *jpeg, size_t len) {
+  if (len > JPEG_CAP) return;
+  uint32_t h = frame_hash(jpeg, len);
+  xSemaphoreTake(pool_mutex, portMAX_DELAY);
+  bool dup = seen_recently(h);
+  if (!dup) {
+    mark_seen(h);
+  }
+  xSemaphoreGive(pool_mutex);
+  if (dup) {
+    stat_dup++;
+    return;
+  }
+  int j = pool_take(jpeg_free, N_JPEG_BUFS);
+  if (j < 0) {
+    stat_drops++;
+    return;
+  }
+  memcpy(jpeg_bufs[j], jpeg, len);
+  JpegItem it{j, seq_next++, len};
+  if (xQueueSend(jpeg_q, &it, 0) != pdTRUE) {
+    pool_put(jpeg_free, j);
+    stat_drops++;
+  }
+}
+
+static void live_video_fn(void *arg) {
+  int conn = (int)(intptr_t)arg;
+  uint8_t *jpeg = (uint8_t *)heap_caps_malloc(JPEG_CAP, MALLOC_CAP_SPIRAM);
+  // rx 缓冲放 PSRAM：lwIP recv 到用户缓冲不涉 DMA，省内部 RAM（任务栈预算紧）
+  uint8_t *rx = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  if (!rx) rx = (uint8_t *)malloc(4096);
   MjpegExtractor ext;
-  ext.init(jpeg, CAP);
-  while (live_running) {
+  ext.init(jpeg, JPEG_CAP);
+  while (live_running && tcp_active) {
     HTTPClient http;
     http.setTimeout(5000);
-    if (!http.begin(String(SERVER_BASE) + "/api/live_band")) { Serial.println("[LIVE] http.begin failed"); break; }
+    if (!http.begin(String(SERVER_BASE) + "/api/live_band")) break;
     int code = http.GET();
     if (code != 200) {
-      rlogf("[LIVE] GET /api/live_band -> %d", code);
+      rlogf("[LIVE%d] GET /api/live_band -> %d", conn, code);
       http.end();
       vTaskDelay(pdMS_TO_TICKS(2000));
       continue;
     }
     WiFiClient *s = http.getStreamPtr();
     s->setNoDelay(true);
-    live_video_stream = s;
-    rlogf("[LIVE] stream connected code=%d", code);
-    size_t frames = 0;
+    live_video_streams[conn] = s;
+    rlogf("[LIVE%d] stream connected (TCP 回退)", conn);
+    uint32_t frames = 0, rx_bytes = 0, starved_ms = 0;
     uint32_t last_rx = millis();
-    // 传输打点：读取字节吞吐 vs 空等（ starving ）时间
-    uint32_t rx_bytes = 0, starved_ms = 0;
+    uint32_t t_connect = millis();
+    bool got_first = false;
     int64_t rx_win_start = esp_timer_get_time();
-    while (live_running && http.connected()) {
+    while (live_running && tcp_active && http.connected()) {
       size_t avail = s->available();
       if (!avail) {
         int64_t ts = esp_timer_get_time();
-        vTaskDelay(pdMS_TO_TICKS(2));  // 让出 CPU，喂 IDLE0
+        vTaskDelay(pdMS_TO_TICKS(2));  // 让出 CPU，喂 IDLE
         starved_ms += (uint32_t)(esp_timer_get_time() - ts) / 1000;
         if (millis() - last_rx > 5000) break;  // 流停滞超时，重连
         continue;
       }
-      int r = s->read(rx, min(avail, (size_t)8192));
+      if (!got_first) {
+        got_first = true;
+        rlogf("[LIVE%d] first bytes after %ums", conn, (unsigned)(millis() - t_connect));
+      }
+      int r = s->read(rx, min(avail, (size_t)4096));
       if (r <= 0) break;
       last_rx = millis();
       rx_bytes += r;
       ext.feed(rx, r, [&](const uint8_t *f, size_t n) {
-        if (++frames <= 3 || frames % 50 == 0) rlogf("[LIVE] frame %u %uB", (unsigned)frames, (unsigned)n);
+        if (++frames <= 3 || frames % 50 == 0) rlogf("[LIVE%d] frame %u %uB", conn, (unsigned)frames, (unsigned)n);
         reader_on_frame(f, n);
       });
-      int64_t now = esp_timer_get_time();
-      if (now - rx_win_start > 10000000) {  // 每 10s 打一次
-        rlogf("[NETRX] %.1f KB/s, starved=%u%%", rx_bytes / 10.24f / 1000.0f, starved_ms / 100);
-        rx_bytes = 0;
-        starved_ms = 0;
-        rx_win_start = now;
+      if (true) {
+        int64_t now = esp_timer_get_time();
+        if (now - rx_win_start > 10000000) {
+          rlogf("[NETRX%d] %.1f KB/s starved=%u%% frames=%u", conn, rx_bytes / 10.24f / 1000.0f, starved_ms / 100, (unsigned)frames);
+          rx_bytes = 0;
+          starved_ms = 0;
+          rx_win_start = now;
+        }
       }
     }
-    live_video_stream = NULL;
+    live_video_streams[conn] = NULL;
     http.end();
-    if (live_running) vTaskDelay(pdMS_TO_TICKS(2000));  // 断流重连
+    if (live_running && tcp_active) vTaskDelay(pdMS_TO_TICKS(2000));  // 断流重连
   }
   if (jpeg) heap_caps_free(jpeg);
-  if (rx) free(rx);
-  video_task = NULL;
+  if (rx) heap_caps_free(rx);
+  reader_tasks[conn] = NULL;
   vTaskDelete(NULL);
 }
 
 static void live_audio_fn(void *) {
-  uint8_t *pcm = (uint8_t *)malloc(4096);
+  uint8_t *pcm = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  if (!pcm) pcm = (uint8_t *)malloc(4096);
   while (live_running) {
     HTTPClient http;
     http.setTimeout(5000);
@@ -357,26 +521,57 @@ static void live_audio_fn(void *) {
     http.end();
     if (live_running) vTaskDelay(pdMS_TO_TICKS(2000));
   }
-  free(pcm);
+  heap_caps_free(pcm);
   audio_task = NULL;
   vTaskDelete(NULL);
+}
+
+// 每 30 帧打一次：实测 fps / 双核解码均耗 / 直推（含 DMA）/ 去重数 / 丢帧 / LVGL flush
+static void stat_tick() {
+  if (++stat_frames < 30) return;
+  int64_t now = esp_timer_get_time();
+  float fps = stat_window_start ? 30.0f * 1e6f / (float)(now - stat_window_start) : 0;
+  uint32_t fus, fcnt;
+  bsp_flush_stats(&fus, &fcnt);
+  rlogf("[STAT] fps=%.1f dec0=%ums(n%u) dec1=%ums(n%u) push=%ums(draw%ums) udp=%u/%u/%u dup=%u drop=%u flush=%ums heap=%u",
+        fps,
+        stat_decode_n[0] ? (unsigned)(stat_decode_us[0] / stat_decode_n[0] / 1000) : 0, (unsigned)stat_decode_n[0],
+        stat_decode_n[1] ? (unsigned)(stat_decode_us[1] / stat_decode_n[1] / 1000) : 0, (unsigned)stat_decode_n[1],
+        (unsigned)(stat_push_us / 30 / 1000), (unsigned)(stat_draw_us / 30 / 1000),
+        (unsigned)stat_udp_frames, (unsigned)stat_udp_frag_drop, (unsigned)stat_udp_rx_drop,
+        (unsigned)stat_dup, (unsigned)stat_drops,
+        fcnt ? (unsigned)(fus / fcnt / 1000) : 0, (unsigned)xPortGetFreeHeapSize());
+  stat_decode_us[0] = stat_decode_us[1] = 0;
+  stat_decode_n[0] = stat_decode_n[1] = 0;
+  stat_udp_frames = 0;
+  stat_udp_frag_drop = 0;
+  stat_udp_rx_drop = 0;
+  stat_push_us = 0;
+  stat_draw_us = 0;
+  stat_dup = 0;
+  stat_drops = 0;
+  stat_frames = 0;
+  stat_window_start = now;
 }
 
 void live_start() {
   live_stop();
   live_running = true;
+  tcp_active = false;
   audio_stream_begin();
   for (int i = 0; i < N_BUFS; i++) {
     if (!logical_bufs[i]) logical_bufs[i] = (uint16_t *)heap_caps_malloc(LIVE_W * LIVE_H * 2, MALLOC_CAP_SPIRAM);
-    if (!logical_bufs[i]) rlogf("[LIVE] logical_bufs[%d] alloc failed", i);
   }
   for (int i = 0; i < N_JPEG_BUFS; i++) {
-    if (!jpeg_bufs[i]) jpeg_bufs[i] = (uint8_t *)heap_caps_malloc(400 * 1024, MALLOC_CAP_SPIRAM);
-    if (!jpeg_bufs[i]) rlogf("[LIVE] jpeg_bufs[%d] alloc failed", i);
+    if (!jpeg_bufs[i]) jpeg_bufs[i] = (uint8_t *)heap_caps_malloc(JPEG_CAP, MALLOC_CAP_SPIRAM);
   }
-  if (!buf_mutex) buf_mutex = xSemaphoreCreateMutex();
-  if (!push_sem) push_sem = xSemaphoreCreateBinary();
-  if (!jpeg_sem) jpeg_sem = xSemaphoreCreateBinary();
+  if (!udp_ring) udp_ring = (uint8_t (*)[UDP_PKT_MAX])heap_caps_malloc(UDP_RING_N * UDP_PKT_MAX, MALLOC_CAP_SPIRAM);
+  if (!reasm) reasm = (uint8_t *)heap_caps_malloc(JPEG_CAP, MALLOC_CAP_SPIRAM);
+  if (!pool_mutex) pool_mutex = xSemaphoreCreateMutex();
+  if (!jpeg_q) jpeg_q = xQueueCreate(8, sizeof(JpegItem));
+  if (!dec_q) dec_q = xQueueCreate(8, sizeof(DecItem));
+  if (!udp_sem) udp_sem = xSemaphoreCreateCounting(UDP_RING_N, 0);
+  last_udp_frame_ms = millis();
   // 确认 JPEGDEC S3 SIMD 是否启用（与 jpeg.inl 的判定一致）
 #if defined(ARDUINO_ARCH_ESP32) && __has_include("dsps_fft2r_platform.h")
   rlogf("[LIVE] JPEGDEC S3 SIMD: ON");
@@ -384,39 +579,45 @@ void live_start() {
   rlogf("[LIVE] JPEGDEC S3 SIMD: OFF");
 #endif
   BaseType_t rp = xTaskCreatePinnedToCore(push_fn, "live_push", 6144, NULL, 4, &push_task, 1);
-  BaseType_t rd = xTaskCreatePinnedToCore(decode_fn, "live_dec", 8192, NULL, 4, &decode_task, 0);
-  BaseType_t rv = xTaskCreatePinnedToCore(live_video_fn, "live_v", 8192, NULL, 4, &video_task, 0);
-  BaseType_t ra = xTaskCreatePinnedToCore(live_audio_fn, "live_a", 6144, NULL, 4, &audio_task, 0);
-  rlogf("[LIVE] start: vtask=%ld dtask=%ld ptask=%ld atask=%ld heap=%u", (long)rv, (long)rd, (long)rp, (long)ra, (unsigned)xPortGetFreeHeapSize());
+  BaseType_t rd0 = xTaskCreatePinnedToCore(decode_fn, "live_dec0", 8192, (void *)0, 4, &decode_tasks[0], 0);
+  BaseType_t rd1 = xTaskCreatePinnedToCore(decode_fn, "live_dec1", 8192, (void *)1, 4, &decode_tasks[1], 1);
+  // UDP 优先：先起 UDP 接收任务（内含注册/续期/回退监督），5s 无帧才回退 TCP reader
+  BaseType_t ru = xTaskCreatePinnedToCore(udp_fn, "live_udp", 6144, NULL, 4, &udp_task, 0);
+  BaseType_t ra = xTaskCreatePinnedToCore(live_audio_fn, "live_a", 4096, NULL, 4, &audio_task, 0);
+  rlogf("[LIVE] start: push=%ld dec=%ld/%ld udp=%ld au=%ld heap=%u",
+        (long)rp, (long)rd0, (long)rd1, (long)ru, (long)ra, (unsigned)xPortGetFreeHeapSize());
 }
 
 void live_stop() {
-  if (!video_task && !audio_task && !push_task && !decode_task) return;
   live_running = false;
+  tcp_active = false;
   // 先断流唤醒阻塞中的 read，让任务自行退出，再考虑强杀
-  if (live_video_stream) live_video_stream->stop();
+  for (int i = 0; i < N_VIDEO_CONNS; i++) {
+    if (live_video_streams[i]) live_video_streams[i]->stop();
+  }
   if (live_audio_stream) live_audio_stream->stop();
-  if (push_sem) xSemaphoreGive(push_sem);  // 唤醒直推任务
-  if (jpeg_sem) xSemaphoreGive(jpeg_sem);  // 唤醒解码任务
+  if (jpeg_q) { JpegItem it{-1, 0, 0}; xQueueSend(jpeg_q, &it, 0); }  // 唤醒解码任务
+  if (dec_q) { DecItem di{-1, 0}; xQueueSend(dec_q, &di, 0); }        // 唤醒直推任务
+  if (udp_sem) xSemaphoreGive(udp_sem);                               // 唤醒 UDP 任务
   uint32_t t0 = millis();
-  while ((video_task || audio_task || push_task || decode_task) && millis() - t0 < 1500) vTaskDelay(pdMS_TO_TICKS(50));
-  if (video_task) {  // 最后手段
-    vTaskDelete(video_task);
-    video_task = NULL;
+  bool any = true;
+  while (any && millis() - t0 < 1500) {
+    any = audio_task || push_task || udp_task;
+    for (int i = 0; i < N_VIDEO_CONNS; i++) any = any || reader_tasks[i];
+    for (int i = 0; i < 2; i++) any = any || decode_tasks[i];
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
-  if (push_task) {
-    vTaskDelete(push_task);
-    push_task = NULL;
+  // 最后手段强杀
+  for (int i = 0; i < N_VIDEO_CONNS; i++) {
+    if (reader_tasks[i]) { vTaskDelete(reader_tasks[i]); reader_tasks[i] = NULL; }
   }
-  if (decode_task) {
-    vTaskDelete(decode_task);
-    decode_task = NULL;
+  for (int i = 0; i < 2; i++) {
+    if (decode_tasks[i]) { vTaskDelete(decode_tasks[i]); decode_tasks[i] = NULL; }
   }
-  if (audio_task) {
-    vTaskDelete(audio_task);
-    audio_task = NULL;
-  }
-  live_video_stream = NULL;
+  if (push_task) { vTaskDelete(push_task); push_task = NULL; }
+  if (udp_task) { vTaskDelete(udp_task); udp_task = NULL; }
+  if (audio_task) { vTaskDelete(audio_task); audio_task = NULL; }
+  for (int i = 0; i < N_VIDEO_CONNS; i++) live_video_streams[i] = NULL;
   live_audio_stream = NULL;
   audio_stream_end();
 }

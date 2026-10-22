@@ -62,6 +62,18 @@ sed -i '' 's|#include "lvgl/lvgl.h"|#include "lvgl.h"|' src/font_cjk20.c
    但每连接到 ESP32 交付一帧约 150ms（cwnd 空闲重置 + 延迟 ACK），叠加 sleep 后
    每连接 ~3.3fps；curl 旁路实测源产帧 ~6.5fps。固件管线容量 ~13fps，不是瓶颈。
    要提速需服务端：按源帧缓存编码结果跨连接共享、降低 sleep、或提高 CAM 产帧率。
+9. **JPEGDEC 实例只能放静态/内部 RAM**：内嵌 JPEGIMAGE 约 20KB（Huffman 表等），
+   放任务栈必爆栈（"Unhandled debug exception" 崩溃循环），放 PSRAM 解码慢 3 倍
+   （150ms→55ms）。双核解码 = 两个 static 实例（JPEGDEC 非线程安全），靠
+   LV_MEM_SIZE 降到 32KB 腾出内部 RAM。
+10. 双连接并行拉流实测**零增益**：两条连接交付的帧序列完全同步，去重后 dup=50%，
+    唯一帧率不变，白白加倍 WiFi 流量。N_VIDEO_CONNS 保留为 1。任务创建失败会在
+    `[LIVE] start` 日志显示 -1（内部 RAM 耗尽的信号，heap<4KB 时检查）。
+11. **UDP 直播（当前默认）**：`GET /api/live_udp?port=5060` 注册（TTL 60s，30s 续期），
+    AsyncUDP 收包（lwIP 回调里只拷入 PSRAM 环）→ 分片重组（追最新 seq、300ms 超时
+    弃帧）→ 双核解码管线。TCP reader 保留为回退：5s 无完整帧自动拉起、UDP 恢复即停。
+    实测投递 = 源产帧率（零丢片）。残留瓶颈在 CAM→服务端链路（cam video 反复掉线，
+    源只产 ~5.5fps），不是桌面屏。
 
 ## 结构
 

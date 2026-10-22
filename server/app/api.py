@@ -150,45 +150,44 @@ async def live_video(request: Request) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+# 直播带编码与缓存在 udp_live 模块（MJPEG 流与 UDP 推送共用）
+from .udp_live import get_band_jpeg as _get_band_jpeg
+from .udp_live import band_jpeg as _band_jpeg  # noqa: F401  # 兼容既有引用
+
+
 @router.get("/api/live_band")
 async def live_video_band(request: Request) -> StreamingResponse:
     """MJPEG 流（宽屏带）：缩放后中心裁 480×240，~10fps，供桌面屏上半屏。"""
-
-    def band_jpeg(jpeg: bytes, quality: int = 55) -> bytes | None:  # ESP32 软解 JPEG 是瓶颈，质量 55 显著降帧大小
-        try:
-            img = Image.open(io.BytesIO(jpeg)).convert("RGB")
-        except OSError:
-            return None  # 环缓冲里偶有重连时的半截帧，跳过即可
-        w, h = img.size
-        img = img.resize((480, int(h * 480 / w)))
-        top = max(0, (img.size[1] - 240) // 2)
-        img = img.crop((0, top, 480, top + 240))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        return buf.getvalue()
-
     services = _svc(request)
-
-    # 跨连接共享编码结果：同一源帧只编码一次（实测每连接重复编码 + TCP 慢启动是帧率瓶颈）
-    band_cache: dict[str, object] = {"ts": 0.0, "jpeg": b""}
 
     async def gen() -> AsyncIterator[bytes]:
         last_sent_ts = 0.0
         while True:
-            frame = services.ring.latest_frame()
-            if frame and frame.ts > last_sent_ts:
-                if band_cache["ts"] != frame.ts:
-                    jpeg = await asyncio.to_thread(band_jpeg, frame.jpeg)
-                    if jpeg is None:
-                        await asyncio.sleep(0.02)
-                        continue
-                    band_cache["ts"] = frame.ts
-                    band_cache["jpeg"] = jpeg
+            # 发送所有新帧（latest-only 会在 TCP 大读到齐时合并丢帧，实测腰斩帧率）
+            for frame in services.ring.frames_since(last_sent_ts):
+                jpeg = await _get_band_jpeg(frame.jpeg, frame.ts)
+                if jpeg is None:
+                    continue
                 last_sent_ts = frame.ts
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + band_cache["jpeg"] + b"\r\n"  # type: ignore[operator]
-            await asyncio.sleep(0.02)  # 20ms 轮询源帧，上限 50fps；实际由源产帧率决定
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+            await asyncio.sleep(0.005)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.get("/api/live_udp")
+async def live_udp_register(request: Request, port: int = 5060) -> dict:
+    """UDP 直播注册：桌面屏调用后，服务端把直播带帧以 UDP 推送到 <调用者IP>:port。
+
+    TCP 到 ESP32 的投递受 lwIP 窗口/延迟 ACK 限制在 ~5fps；UDP 无此语义。
+    注册有效期 60 秒，客户端需周期续期。帧分片格式见 UdpLivePush。
+    """
+    svc = _svc(request)
+    host = request.client.host if request.client else None
+    if not host:
+        raise HTTPException(status_code=400, detail="no client host")
+    svc.udp_live.register(host, port)
+    return {"ok": True, "target": f"{host}:{port}", "ttl_s": 60}
 
 
 @router.get("/api/live_audio")

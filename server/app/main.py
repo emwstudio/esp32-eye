@@ -63,6 +63,9 @@ class Services:
         self.recorder = Recorder(settings, self.ring, self.storage)
         self.identifier = Identifier(settings, self.storage, self.ring, id_fn=id_fn)
         self.identifier.on_identified = lambda eid: self.spawn(self._on_identified(eid))
+        from .udp_live import UdpLivePush
+
+        self.udp_live = UdpLivePush(self.ring)
 
         if gate_fn is None:
             gate_client = VisionModelClient(
@@ -155,10 +158,12 @@ class Services:
     def start_background(self) -> None:
         self.ingest.start()
         self.detector.start()
+        self.spawn(self.udp_live.start())
 
     async def shutdown(self) -> None:
         await self.detector.stop()
         await self.ingest.stop()
+        await self.udp_live.stop()
         for t in list(self._bg_tasks):
             t.cancel()
         if self._bg_tasks:
