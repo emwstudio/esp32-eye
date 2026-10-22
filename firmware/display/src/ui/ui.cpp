@@ -237,7 +237,7 @@ static void build_main() {
   lv_obj_set_style_radius(lbl_clock, 6, 0);
 
   // 中间大标题
-  lv_obj_t *lbl_title = make_label(scr_main, "猫猫喝水计数器");
+  lv_obj_t *lbl_title = make_label(scr_main, "猫咪喝水计数器");
   lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 6);
   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x9fd3b8), 0);
 
