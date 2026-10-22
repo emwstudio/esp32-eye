@@ -42,8 +42,7 @@ static uint16_t *rot_buf = nullptr;  // 直播直推 staging 缓冲
 
 // 直播直推与 LVGL flush 共享 rot_buf（双方都在 lv_lock 内使用，互斥）
 uint16_t *bsp_video_stage_buf() {
-  if (!rot_buf) rot_buf = (uint16_t *)heap_caps_malloc(LCD_WIDTH * LCD_HEIGHT / 20 * 2, MALLOC_CAP_DMA);
-  return rot_buf;
+  return rot_buf;  // 在 bsp_display_init 里已分配（堆最充足时）
 }
 
 static uint32_t flush_total_us = 0, flush_count = 0;
@@ -107,6 +106,9 @@ bool bsp_display_init() {
   }
   gfx->setBrightness(200);
   gfx->fillScreen(0x0000);
+  // 直播 staging 缓冲必须尽早分配（等直播启动再分，内部 RAM 已被任务栈切碎）
+  rot_buf = (uint16_t *)heap_caps_malloc(LCD_WIDTH * LCD_HEIGHT / 20 * 2, MALLOC_CAP_DMA);
+  if (!rot_buf) Serial.println("[BSP] video stage buf alloc failed");
   return true;
 }
 

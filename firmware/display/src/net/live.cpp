@@ -52,7 +52,16 @@ static int live_jpeg_draw(JPEGDRAW *d) {
 // 分块仅为了持锁粒度——与 LVGL flush 共享 gfx 总线，让 UI 在块间插空刷新。
 static void push_video_frame(const uint16_t *logical_buf) {
   uint16_t *stage = bsp_video_stage_buf();  // 240*48 px = 480*24 px
-  if (!stage) return;
+  if (!stage) {
+    static uint32_t last_log = 0;
+    if (millis() - last_log > 5000) {  // 限频，防日志刷屏
+      last_log = millis();
+      rlogf("[LIVE] push: stage 缓冲分配失败（内部 RAM 不足），heap=%u", (unsigned)xPortGetFreeHeapSize());
+    }
+    return;
+  }
+  static bool first_push = true;
+  if (first_push) { first_push = false; rlogf("[LIVE] 首次直推成功"); }
   const int CHUNK = 24;
   for (int y0 = 0; y0 < LIVE_H; y0 += CHUNK) {
     memcpy(stage, logical_buf + (size_t)y0 * LIVE_W, LIVE_W * CHUNK * 2);
