@@ -217,11 +217,11 @@ static void refresh_cards() {
 
 // ---------- 构建页面 ----------
 // 布局（面板原生方向 480×480）：
-//   y=0..44    标题栏（左时钟右状态点+中间大标题，同一水平线，内收避圆角）
-//   y=44..244  视频带 480×200（/api/live_band?h=200，无 LVGL 对象，直推独占）
-//   y=244..480 2×2 猫卡片（每张 240×112）
-#define TITLE_H 44
-#define VIDEO_Y 44
+//   y=0..34    标题栏（三元素同基线垂直居中，内收避圆角）
+//   y=34..234  视频带 480×200（/api/live_band?h=200，无 LVGL 对象，直推独占）
+//   y=234..480 2×2 猫卡片（每张 240×112）
+#define TITLE_H 34
+#define VIDEO_Y 34
 static void build_main() {
   scr_main = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scr_main, lv_color_hex(0x101418), 0);
@@ -230,7 +230,7 @@ static void build_main() {
   // ---- 标题栏 ----
   // 左侧时间（往右收 30px，避开圆角）
   lbl_clock = make_label(scr_main, "--:--");
-  lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 38, 10);
+  lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 38, 6);
   lv_obj_set_style_bg_color(lbl_clock, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(lbl_clock, LV_OPA_50, 0);
   lv_obj_set_style_pad_all(lbl_clock, 4, 0);
@@ -238,12 +238,12 @@ static void build_main() {
 
   // 中间大标题
   lv_obj_t *lbl_title = make_label(scr_main, "猫猫喝水计数器");
-  lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 10);
+  lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 6);
   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x9fd3b8), 0);
 
   // 右侧连接状态点（往左收 30px，避开圆角）
   lbl_status = make_label(scr_main, "●");
-  lv_obj_align(lbl_status, LV_ALIGN_TOP_RIGHT, -40, 10);
+  lv_obj_align(lbl_status, LV_ALIGN_TOP_RIGHT, -40, 6);
   lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xd94f4f), 0);
 
   // 离线遮罩（视频带）
@@ -277,7 +277,7 @@ static void build_main() {
     lv_obj_t *card = lv_obj_create(scr_main);
     cat_cards[i] = card;
     lv_obj_set_size(card, 236, 108);
-    lv_obj_set_pos(card, (i % 2) * 240 + 2, 244 + (i / 2) * 112 + 2);
+    lv_obj_set_pos(card, (i % 2) * 240 + 2, 234 + (i / 2) * 112 + 2);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x181d23), 0);
     lv_obj_set_style_radius(card, 14, 0);
     lv_obj_set_style_border_width(card, 2, 0);
