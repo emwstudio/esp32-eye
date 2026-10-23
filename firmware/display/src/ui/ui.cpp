@@ -399,7 +399,7 @@ static void build_main() {
     lv_obj_set_style_text_font(cat_counts[i], &font_num28, 0);
     lv_obj_set_pos(cat_counts[i], 108, 56);
     char ub[16];
-    snprintf(ub, sizeof(ub), "/%d次", DAILY_GOAL);
+    snprintf(ub, sizeof(ub), "/ %d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
     lv_obj_set_style_text_font(unit, &font_cjk16, 0);
     lv_obj_set_pos(unit, 128, 62);  // x 会在 refresh_cards 按数字实际宽度重排（贴合大数字）
