@@ -1,5 +1,6 @@
 #include "bsp_audio.h"
 #include "board_pins.h"
+#include "net/rlog.h"
 #include "driver/i2s.h"
 #include "esp_check.h"
 #include "../es8311/es8311.h"
@@ -8,7 +9,15 @@
 // ES8311 初始化序列移植自官方 07_ES8311 示例（I2S 驱动改用 legacy driver/i2s.h 以便控制 DMA/环形缓冲）
 
 #define I2S_PORT I2S_NUM_0
-#define VOICE_VOLUME 85  // 0-100
+// 直播音量（codec voice 音量寄存器）：原 85 压低到 60%，避免喇叭把环境底噪放得过大、不削波
+#define LIVE_VOLUME 51  // 0-100
+
+// ---- 噪声门（直播环境底噪抑制：安静时静音，有声音立刻开门）----
+#define GATE_RMS_FLOOR 600    // RMS 阈值下限（int16 绝对值均值）
+#define GATE_HOLD_MS 300      // 低于阈值持续该时长才关门
+#define GATE_ATTACK_MS 5      // 开门斜坡（快，不吞舔水声开头）
+#define GATE_RELEASE_MS 25    // 关门斜坡（慢，防爆音）
+#define GATE_ADAPT_WIN 313    // 底噪自适应窗口（块数；32ms/块 ≈ 10s）
 
 // 环形缓冲 48KB ≈ 1.5s @16kHz/16bit mono
 #define RING_SIZE (48 * 1024)
@@ -52,7 +61,7 @@ static esp_err_t es8311_codec_init() {
   }
   ESP_RETURN_ON_ERROR(es8311_sample_frequency_config(es_handle, es_clk.mclk_frequency, es_clk.sample_frequency), TAG, "set freq failed");
   ESP_RETURN_ON_ERROR(es8311_microphone_config(es_handle, false), TAG, "mic cfg failed");
-  ESP_RETURN_ON_ERROR(es8311_voice_volume_set(es_handle, VOICE_VOLUME, NULL), TAG, "volume failed");
+  ESP_RETURN_ON_ERROR(es8311_voice_volume_set(es_handle, LIVE_VOLUME, NULL), TAG, "volume failed");
   return ESP_OK;
 }
 
@@ -90,6 +99,84 @@ static void i2s_bus_init() {
   i2s_zero_dma_buffer(I2S_PORT);
 }
 
+// ---- 噪声门状态（writer 任务独占）----
+static bool gate_open = false;
+static float gate_gain = 0.0f;             // 0..1 乘法增益（斜坡防爆音）
+static uint32_t below_since = 0;           // RMS 持续低于阈值的起始时刻
+static uint16_t rms_hist[GATE_ADAPT_WIN];  // 每块 RMS 历史（自适应底噪）
+static int rms_hist_i = 0;
+static uint32_t rms_hist_n = 0;
+static uint32_t gate_threshold = GATE_RMS_FLOOR;
+static uint32_t last_gate_log = 0;
+
+static void gate_log(const char *msg, uint32_t rms) {
+  // 限频：状态切换日志每分钟最多 3 条
+  if (millis() - last_gate_log < 20000) return;
+  last_gate_log = millis();
+  rlogf("[GATE] %s rms=%u th=%u", msg, (unsigned)rms, (unsigned)gate_threshold);
+}
+
+// 每 ~1s 重算一次自适应阈值：阈值 = max(下限, 窗口内最低 RMS × 1.8)
+static void gate_adapt() {
+  if (rms_hist_n < 31) return;  // 至少 1s 数据
+  uint16_t mn = 0xFFFF;
+  uint32_t n = rms_hist_n < GATE_ADAPT_WIN ? rms_hist_n : GATE_ADAPT_WIN;
+  for (uint32_t i = 0; i < n; i++) {
+    if (rms_hist[i] < mn) mn = rms_hist[i];
+  }
+  gate_threshold = max((uint32_t)GATE_RMS_FLOOR, (uint32_t)(mn * 1.8f));
+}
+
+// 对一个 mono 块做门控 + 增益斜坡，输出仍是 mono（调用方再转立体声）
+static void gate_process(int16_t *mono, size_t frames) {
+  uint32_t acc = 0;
+  for (size_t i = 0; i < frames; i++) acc += abs(mono[i]);
+  uint16_t rms = frames ? (uint16_t)(acc / frames) : 0;
+  rms_hist[rms_hist_i] = rms;
+  rms_hist_i = (rms_hist_i + 1) % GATE_ADAPT_WIN;
+  rms_hist_n++;
+  if (rms_hist_n % 31 == 0) gate_adapt();
+
+  bool above = rms >= gate_threshold;
+  if (above) {
+    below_since = 0;
+    if (!gate_open) {
+      gate_open = true;
+      gate_log("OPEN", rms);
+    }
+  } else {
+    if (!below_since) below_since = millis();
+    if (gate_open && millis() - below_since > GATE_HOLD_MS) {
+      gate_open = false;
+      gate_log("CLOSE", rms);
+    }
+  }
+
+  float target = gate_open ? 1.0f : 0.0f;
+  float att = 1.0f / (AUDIO_SAMPLE_RATE * GATE_ATTACK_MS / 1000.0f);
+  float rel = 1.0f / (AUDIO_SAMPLE_RATE * GATE_RELEASE_MS / 1000.0f);
+  for (size_t i = 0; i < frames; i++) {
+    if (gate_gain < target) {
+      gate_gain += att;
+      if (gate_gain > target) gate_gain = target;
+    } else if (gate_gain > target) {
+      gate_gain -= rel;
+      if (gate_gain < target) gate_gain = target;
+    }
+    int32_t s = (int32_t)(mono[i] * gate_gain);
+    mono[i] = (int16_t)(s > 32767 ? 32767 : (s < -32768 ? -32768 : s));
+  }
+}
+
+static void gate_reset() {
+  gate_open = false;
+  gate_gain = 0.0f;
+  below_since = 0;
+  rms_hist_i = 0;
+  rms_hist_n = 0;
+  gate_threshold = GATE_RMS_FLOOR;
+}
+
 // 从环形缓冲取 mono 采样，复制成立体声写 I2S；不足时写静音（不计时钟）
 static void writer_fn(void *) {
   const size_t CHUNK = 512;  // mono 帧数
@@ -114,6 +201,7 @@ static void writer_fn(void *) {
     size_t frames = got / 2;
     size_t bytes_written = 0;
     if (frames > 0) {
+      gate_process(mono, frames);  // 噪声门：安静时渐入静音，有声立刻开门
       for (size_t i = 0; i < frames; i++) {
         stereo[2 * i] = mono[i];
         stereo[2 * i + 1] = mono[i];
@@ -168,6 +256,7 @@ void audio_stream_begin() {
   started = false;
   stream_paused = false;
   stream_active = true;
+  gate_reset();  // 新流从关门状态起步，安静环境不会先响一下
   xSemaphoreGive(ring_mutex);
 }
 
