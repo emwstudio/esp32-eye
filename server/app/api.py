@@ -215,6 +215,22 @@ async def ws_events(ws: WebSocket) -> None:
     services: "Services" = ws.app.state.services
     await ws.accept()
     services.bus.connect(ws)
+
+    async def _heartbeat() -> None:
+        # 30s 应用层心跳：桌面屏靠它识别"连接假死"（TCP 活着但消息不通）
+        # 并重连；服务端这边发送失败即关连接，促使 receive 退出。
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await ws.send_json({"type": "hb"})
+            except Exception:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+                return
+
+    hb = asyncio.create_task(_heartbeat())
     try:
         summary = services.storage.today_summary()
         await ws.send_json(
@@ -225,6 +241,7 @@ async def ws_events(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        hb.cancel()
         services.bus.disconnect(ws)
 
 

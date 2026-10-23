@@ -63,6 +63,7 @@ static void handle_message(const String &payload) {
 static void events_fn(void *) {
   String url = server_ws_base() + "/ws/events";
   uint32_t backoff = 1000;
+  static volatile uint32_t last_rx_ms = 0;  // 任何消息（含 hb 心跳）都刷新
   while (running) {
     if (WiFi.status() != WL_CONNECTED) {
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -71,7 +72,10 @@ static void events_fn(void *) {
     rlogf("[WS] connecting %s", url.c_str());
 
     client.onMessage([](WebsocketsMessage msg) {
-      if (msg.isText()) handle_message(msg.data());
+      if (msg.isText()) {
+        last_rx_ms = millis();
+        handle_message(msg.data());
+      }
     });
     client.onEvent([](WebsocketsEvent event, String data) {
       if (event == WebsocketsEvent::ConnectionOpened) {
@@ -90,8 +94,16 @@ static void events_fn(void *) {
     bool ok = client.connect(url);
     if (ok) {
       backoff = 1000;
+      last_rx_ms = millis();
       while (running && client.available()) {
         client.poll();
+        // 心跳超时重连：服务端 30s 一个 hb；90s 无任何消息说明连接假死
+        // （TCP 活着但消息不通——曾导致计数/动画长期不更新）
+        if (millis() - last_rx_ms > 90000) {
+          Serial.println("[WS] heartbeat timeout, reconnecting");
+          rlogf("[WS] 心跳超时重连");
+          break;
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
       }
     }

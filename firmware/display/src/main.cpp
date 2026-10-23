@@ -106,6 +106,24 @@ static void health_fn(void *) {
       wifi_begin();
     }
     bool ok = wifi && rest_health();
+    if (ok) {
+      // 跨天归零：本地日期变了就重拉今日计数（服务端按自然日统计，0 点自动清零）
+      time_t now = time(NULL);
+      if (now > 1000000000) {
+        struct tm tmv;
+        localtime_r(&now, &tmv);
+        char d[16];
+        snprintf(d, sizeof(d), "%04d-%02d-%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        bool day_changed = g_state.today_date.length() > 0 && g_state.today_date != d;
+        xSemaphoreGive(state_mutex);
+        if (day_changed) {
+          rlogf("[HEALTH] 跨天 → %s，重拉今日计数", d);
+          rest_fetch_today();
+          ui_cmd_refresh_home();
+        }
+      }
+    }
     if (!ok && !offline) {
       ui_cmd_set_offline(true, wifi ? "服务器不可达" : "WiFi 断开");
     } else if (ok && offline) {
