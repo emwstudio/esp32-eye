@@ -116,10 +116,9 @@ class Recorder:
             # CRF 18 + medium：接近无损地保留源 JPEG 帧细节（默认 CRF23 会再糊一档）
             args += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
             if pcm_path is not None:
-                # 高通 150Hz 滤 50Hz 工频哼声（降增益后仍在，只是占比小了）。
-                # 不开 afftdn 降噪：降增益后底噪已 -40dBFS，降噪器的"水声感"失真
-                # 会伤到舔水声，得不偿失（实测权衡，需要时可加回 nr=10:nf=-40）
-                args += ["-af", "highpass=f=150", "-c:a", "aac", "-shortest"]
+                # 用户决定：音频原样导出，不加任何滤波/降噪
+                #（高通/降噪改变了噪音质感，持续底噪比处理过的断续感更自然）
+                args += ["-c:a", "aac", "-shortest"]
             args.append(str(out_path))
             await _run_ffmpeg(args)
 
