@@ -61,7 +61,6 @@ static const lv_font_t *font_cjk = &font_cjk20;
 
 static lv_obj_t *lbl_clock, *lbl_status;
 static lv_obj_t *offline_mask, *offline_lbl;
-static lv_obj_t *banner, *banner_lbl;
 static lv_obj_t *cat_cards[4], *cat_imgs[4], *cat_names[4], *cat_counts[4], *cat_units[4];
 static lv_obj_t *home_empty;
 
@@ -74,53 +73,6 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *txt) {
   lv_obj_add_style(l, &st_text, 0);
   lv_label_set_text(l, txt);
   return l;
-}
-
-// ---------- 横幅（视频区顶部细条）----------
-// 慢动作诊断开关：排查"卡片下方绿色绘制"用（已定位：横幅 z 序在卡片之下）
-#define ANIM_SLOWMO 1
-static void banner_anim_y(void *obj, int32_t v) { lv_obj_set_y((lv_obj_t *)obj, v); }
-
-static void banner_show(const char *text) {
-  lv_label_set_text(banner_lbl, text);
-  lv_anim_t a;
-  lv_anim_init(&a);
-  lv_anim_set_var(&a, banner);
-  lv_anim_set_exec_cb(&a, banner_anim_y);
-  lv_anim_set_values(&a, 480, 260);  // 从屏外下方滑到视频带下缘（浮在猫卡区顶部）
-  lv_anim_set_time(&a, 250 * ANIM_SLOWMO);
-  lv_anim_start(&a);
-}
-
-static void banner_hide() {
-  lv_anim_t a;
-  lv_anim_init(&a);
-  lv_anim_set_var(&a, banner);
-  lv_anim_set_exec_cb(&a, banner_anim_y);
-  lv_anim_set_values(&a, lv_obj_get_y(banner), 480);
-  lv_anim_set_time(&a, 220 * ANIM_SLOWMO);
-  lv_anim_start(&a);
-}
-
-static void banner_auto_hide(uint32_t ms) {
-  lv_timer_t *t = lv_timer_create([](lv_timer_t *tm) {
-    banner_hide();
-    lv_timer_del(tm);
-  }, ms, NULL);
-  lv_timer_set_repeat_count(t, 1);
-}
-
-static void banner_set_pending() {
-  rlogf("[UI] banner pending");
-  lv_obj_set_style_border_color(banner, lv_color_hex(0x3fb27f), 0);
-  banner_show("有猫在喝水…");
-}
-
-static void banner_set_unknown() {
-  rlogf("[UI] banner unknown");
-  lv_obj_set_style_border_color(banner, lv_color_hex(0xd9a54f), 0);
-  banner_show("有猫在喝水（没认出是哪只）");
-  banner_auto_hide(5000);
 }
 
 // ---------- 猫卡片动画 ----------
@@ -146,8 +98,8 @@ static void card_pulse(lv_obj_t *card, lv_color_t color) {
   lv_anim_set_var(&a, card);
   lv_anim_set_exec_cb(&a, card_pulse_cb);
   lv_anim_set_values(&a, 0, 100);
-  lv_anim_set_time(&a, 350 * ANIM_SLOWMO);
-  lv_anim_set_playback_time(&a, 350 * ANIM_SLOWMO);
+  lv_anim_set_time(&a, 350);
+  lv_anim_set_playback_time(&a, 350);
   lv_anim_set_repeat_count(&a, 3);
   lv_anim_start(&a);
 }
@@ -181,18 +133,19 @@ static void card_highlight(int idx, lv_color_t color) {
 }
 
 static void count_bounce_cb(void *obj, int32_t v) {
-  lv_obj_set_style_transform_zoom((lv_obj_t *)obj, v, 0);
+  lv_obj_set_y((lv_obj_t *)obj, v);
 }
 
 static void count_bounce(lv_obj_t *lbl) {
-  // 大号数字常态 zoom=256（1x），弹跳冲到 320（1.25x）再回弹
+  // 上跳 6px 再落回（不用 transform_zoom：缩放渲染在该面板上有裁剪问题）
+  int32_t y0 = lv_obj_get_y(lbl);
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, lbl);
   lv_anim_set_exec_cb(&a, count_bounce_cb);
-  lv_anim_set_values(&a, 256, 320);
-  lv_anim_set_time(&a, 180);
-  lv_anim_set_playback_time(&a, 220);
+  lv_anim_set_values(&a, y0, y0 - 6);
+  lv_anim_set_time(&a, 160);
+  lv_anim_set_playback_time(&a, 240);
   lv_anim_set_repeat_count(&a, 1);
   lv_anim_start(&a);
 }
@@ -222,15 +175,8 @@ static void bar_set_animated(int i, int value) {
   lv_anim_start(&a);
 }
 
-static void banner_set_confirmed(const String &cat_id) {
-  CatInfo *c = find_cat(cat_id);
-  String name = c ? c->name : cat_id;
-  char buf[64];
-  snprintf(buf, sizeof(buf), "%s 在喝水", name.c_str());
-  lv_obj_set_style_border_color(banner, lv_color_hex(0x3fb27f), 0);
-  banner_show(buf);
-  banner_auto_hide(8000);
-  // 对应猫卡片绿色边框脉冲
+static void card_on_confirmed(const String &cat_id) {
+  // 对应猫卡片主题色脉冲 + 数字弹跳（无横幅弹窗——用户决定：高亮已足够）
   xSemaphoreTake(state_mutex, portMAX_DELAY);
   int idx = -1;
   for (int i = 0; i < (int)g_state.cats.size() && i < 4; i++) {
@@ -340,20 +286,6 @@ static void build_main() {
   lv_obj_center(offline_lbl);
   lv_obj_add_flag(offline_mask, LV_OBJ_FLAG_HIDDEN);
 
-  // 喝水横幅（浮在猫卡区顶部一行，默认藏在屏外下方）
-  banner = lv_obj_create(scr_main);
-  lv_obj_set_size(banner, 440, 40);
-  lv_obj_set_pos(banner, 20, 480);  // 初始藏在屏外下方
-  lv_obj_set_style_radius(banner, 12, 0);
-  lv_obj_set_style_bg_color(banner, lv_color_hex(0x22303c), 0);
-  lv_obj_set_style_bg_opa(banner, LV_OPA_90, 0);
-  lv_obj_set_style_border_color(banner, lv_color_hex(0x3fb27f), 0);
-  lv_obj_set_style_border_width(banner, 2, 0);
-  lv_obj_set_style_clip_corner(banner, true, 0);
-  lv_obj_clear_flag(banner, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-  banner_lbl = make_label(banner, "");
-  lv_obj_center(banner_lbl);
-
   // 猫卡片区：2x2（每格 240x112，卡片 236x108）
   for (int i = 0; i < 4; i++) {
     lv_obj_t *card = lv_obj_create(scr_main);
@@ -417,10 +349,6 @@ static void build_main() {
   home_empty = make_label(scr_main, "等待猫咪档案…");
   lv_obj_align(home_empty, LV_ALIGN_BOTTOM_MID, 0, -100);
   lv_obj_add_flag(home_empty, LV_OBJ_FLAG_HIDDEN);
-
-  // 横幅浮到最顶层（它在卡片之前创建，不提层会压在卡片下面，
-  // 滑动时只能从卡片缝隙透出绿边——曾被看作"卡片下方绿色花屏"）
-  lv_obj_move_foreground(banner);
 }
 
 // ---------- 秒级状态刷新 ----------
@@ -492,27 +420,18 @@ void ui_process() {
         lv_unlock();
         break;
       case CMD_DRINKING_STARTED:
-        lv_lock();
-        banner_set_pending();
-        lv_unlock();
-        break;
+        break;  // 无横幅弹窗：提醒音已在事件层播放，视觉反馈等 cat_confirmed
       case CMD_CAT_CONFIRMED:
         state_bump_count(c.cat_id);
         lv_lock();
-        banner_set_confirmed(c.cat_id);
+        card_on_confirmed(c.cat_id);
         refresh_cards();
         lv_unlock();
         rlogf("[UI] cat_confirmed %s count+1", c.cat_id);
         break;
       case CMD_CAT_UNKNOWN:
-        lv_lock();
-        banner_set_unknown();
-        lv_unlock();
-        break;
+        break;  // 无横幅弹窗（用户决定：高亮已足够）
       case CMD_EVENT_DISCARDED:
-        lv_lock();
-        banner_hide();
-        lv_unlock();
         break;
       case CMD_OFFLINE:
         lv_lock();
