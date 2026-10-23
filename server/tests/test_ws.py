@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.storage import local_date_str
 
-from conftest import flat_jpeg, random_jpeg
+from conftest import flat_jpeg, blob_jpeg
 
 
 def parse_frames(messages):
@@ -23,19 +23,15 @@ def parse_frames(messages):
 
 
 def test_ws_events_hello_and_event_flow(settings):
-    votes = iter([(True, 0.9)] * 3 + [(False, 0.1)] * 4)
-
-    async def gate_fn(jpeg: bytes):
-        return next(votes, (False, 0.0))
-
     async def id_fn(frames, refs):
         return "buding", 0.86, True
 
-    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
+    app = create_app(settings, id_fn=id_fn)
     with TestClient(app) as client:
         services = app.state.services
         # 停掉 detector 后台轮询，手动喂帧以保证确定性
         client.portal.call(services.detector.stop)
+        services.detector.reset_baseline()  # 清掉 mock cam 帧建立的背景基线，手动喂帧从干净基线开始
 
         with client.websocket_connect("/ws/events") as ws:
             hello = ws.receive_json()
@@ -43,7 +39,7 @@ def test_ws_events_hello_and_event_flow(settings):
             assert hello["counts"] == {} and "date" in hello
 
             ts = time.time()
-            frames = [flat_jpeg()] + [random_jpeg(i) for i in range(7)]
+            frames = [flat_jpeg()] + [blob_jpeg(i) for i in range(3)] + [flat_jpeg()] * 4
             # 前 4 帧（基线 + 3 次肯定）→ drinking_started
             for i, jpeg in enumerate(frames[:4]):
                 client.portal.call(services.detector.process_frame, jpeg, ts + i * 0.1)
@@ -90,7 +86,7 @@ def test_ws_clip_binary_frames(settings, tmp_path):
         check=True, capture_output=True,
     )
 
-    app = create_app(settings, gate_fn=None, id_fn=None)
+    app = create_app(settings)
     with TestClient(app) as client:
         storage = app.state.services.storage
         # 停后台任务，避免无关模型调用
@@ -138,7 +134,7 @@ def test_ws_clip_binary_frames(settings, tmp_path):
 
 
 def test_ws_clip_missing_event(settings):
-    app = create_app(settings, gate_fn=None, id_fn=None)
+    app = create_app(settings)
     with TestClient(app) as client:
         client.portal.call(app.state.services.detector.stop)
         client.portal.call(app.state.services.ingest.stop)
@@ -148,23 +144,19 @@ def test_ws_clip_missing_event(settings):
 
 
 def _drive_event(client, services, n_pos=3, n_neg=4):
-    """手动喂帧走完一次事件（触发 + 释放），返回收到的第一条 drinking_started。"""
+    """手动喂帧走完一次事件（触发 + 释放）。blob=猫在画面（肯定），flat=空场景（否定）。"""
+    services.detector.reset_baseline()  # 同上：清掉 mock cam 建立的背景基线
     ts = time.time()
-    frames = [flat_jpeg()] + [random_jpeg(i) for i in range(n_pos + n_neg)]
+    frames = [flat_jpeg()] + [blob_jpeg(i) for i in range(n_pos)] + [flat_jpeg()] * n_neg
     for i, jpeg in enumerate(frames):
         client.portal.call(services.detector.process_frame, jpeg, ts + i * 0.1)
 
 
 def test_ws_event_discarded_flow(settings):
-    votes = iter([(True, 0.9)] * 3 + [(False, 0.1)] * 4)
-
-    async def gate_fn(jpeg: bytes):
-        return next(votes, (False, 0.0))
-
     async def id_fn(frames, refs):
         return "buding", 0.95, False  # 35B 复核：并非在喝水
 
-    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
+    app = create_app(settings, id_fn=id_fn)
     with TestClient(app) as client:
         services = app.state.services
         client.portal.call(services.detector.stop)
@@ -185,15 +177,11 @@ def test_ws_event_discarded_flow(settings):
 
 def test_ws_event_unknown_then_correct(settings, make_cats):
     make_cats(settings.cats_dir)
-    votes = iter([(True, 0.9)] * 3 + [(False, 0.1)] * 4)
-
-    async def gate_fn(jpeg: bytes):
-        return next(votes, (False, 0.0))
 
     async def id_fn(frames, refs):
         return "buding", 0.3, True  # 置信度不足
 
-    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
+    app = create_app(settings, id_fn=id_fn)
     with TestClient(app) as client:
         services = app.state.services
         client.portal.call(services.detector.stop)
@@ -237,7 +225,7 @@ def test_ws_clip_silent_video_gets_silence_audio(settings):
         check=True, capture_output=True,
     )
 
-    app = create_app(settings, gate_fn=None, id_fn=None)
+    app = create_app(settings)
     with TestClient(app) as client:
         storage = app.state.services.storage
         client.portal.call(app.state.services.detector.stop)

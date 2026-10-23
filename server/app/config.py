@@ -32,7 +32,7 @@ class Settings:
     id_model_name: str = "MiniCPM-V-4.7-35B-A3B"
     id_model_api_key: str = ""
 
-    motion_diff_threshold: float = 12.0
+    occupancy_ratio_threshold: float = 0.35  # 猫占画面比例超过该值判"在喝水"（碗沿机位语义）
     gate_interval_s: float = 1.5
     trigger_consecutive: int = 3
     release_consecutive: int = 4
@@ -85,7 +85,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
     s.id_model_base_url = os.getenv("ID_MODEL_BASE_URL", s.id_model_base_url)
     s.id_model_name = os.getenv("ID_MODEL_NAME", s.id_model_name)
     s.id_model_api_key = os.getenv("ID_MODEL_API_KEY", s.id_model_api_key)
-    s.motion_diff_threshold = float(os.getenv("MOTION_DIFF_THRESHOLD", s.motion_diff_threshold))
+    s.occupancy_ratio_threshold = float(os.getenv("OCCUPANCY_RATIO_THRESHOLD", s.occupancy_ratio_threshold))
     s.gate_interval_s = float(os.getenv("GATE_INTERVAL_S", s.gate_interval_s))
     s.trigger_consecutive = int(os.getenv("TRIGGER_CONSECUTIVE", s.trigger_consecutive))
     s.release_consecutive = int(os.getenv("RELEASE_CONSECUTIVE", s.release_consecutive))

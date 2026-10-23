@@ -36,6 +36,15 @@ def flat_jpeg(gray: int = 128, size: int = 96) -> bytes:
     return buf.getvalue()
 
 
+def blob_jpeg(seed: int = 0, size: int = 96) -> bytes:
+    """空场景（灰底）+ 大块前景：模拟猫头占满画面（背景差分占比高）。"""
+    img = np.full((size, size), 128, dtype=np.uint8)
+    img[: size * 3 // 4, : size * 3 // 4] = 20  # 56% 面积的深色块（≈猫头占比）
+    buf = io.BytesIO()
+    Image.fromarray(img, mode="L").convert("RGB").save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 @pytest.fixture
 def make_cats(tmp_path):
     """在 settings.cats_dir 下生成两只猫的参考照片。"""
