@@ -384,13 +384,13 @@ static void build_main() {
     cat_names[i] = make_label(card, "");
     lv_obj_set_pos(cat_names[i], 110, 4);
 
-    // 右中：小字"今日喝水" + 大号次数数字（32px 数字字体，不用缩放）+ 小字"/8次"
+    // 右中：小字"今日喝水" + 大号次数数字（32px 数字字体）+ 小字"/8次"，行距留足不叠字
     lv_obj_t *today = make_label(card, "今日喝水");
-    lv_obj_set_pos(today, 110, 32);
+    lv_obj_set_pos(today, 110, 28);
     lv_obj_set_style_text_color(today, lv_color_hex(0x8a93a0), 0);
     cat_counts[i] = make_label(card, "0");
     lv_obj_set_style_text_font(cat_counts[i], &font_num32, 0);
-    lv_obj_set_pos(cat_counts[i], 110, 48);
+    lv_obj_set_pos(cat_counts[i], 110, 54);
     char ub[16];
     snprintf(ub, sizeof(ub), "/%d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
@@ -443,8 +443,18 @@ static void sec_tick(lv_timer_t *) {
   xSemaphoreTake(state_mutex, portMAX_DELAY);
   bool srv = g_state.server_ok, ws = g_state.ws_ok;
   xSemaphoreGive(state_mutex);
-  lv_label_set_text(lbl_clock, clk);
-  lv_obj_set_style_text_color(lbl_status, (srv && ws) ? lv_color_hex(0x3fb27f) : lv_color_hex(0xd94f4f), 0);
+  // 只在内容变化时重绘（配合 flush 裁剪，避免无谓刷新区撞视频带）
+  static char last_clk[16] = {0};
+  if (strcmp(clk, last_clk) != 0) {
+    strncpy(last_clk, clk, sizeof(last_clk) - 1);
+    lv_label_set_text(lbl_clock, clk);
+  }
+  static bool last_ok = true;  // 初值 true ≠ 初始红，强制首刷
+  bool ok = srv && ws;
+  if (ok != last_ok) {
+    last_ok = ok;
+    lv_obj_set_style_text_color(lbl_status, ok ? lv_color_hex(0x3fb27f) : lv_color_hex(0xd94f4f), 0);
+  }
 }
 
 // ---------- 初始化 ----------

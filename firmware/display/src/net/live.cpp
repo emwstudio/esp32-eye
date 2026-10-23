@@ -625,6 +625,7 @@ void live_start() {
   // UDP 优先：先起 UDP 接收任务（内含注册/续期/回退监督），5s 无帧才回退 TCP reader
   BaseType_t ru = xTaskCreatePinnedToCore(udp_fn, "live_udp", 6144, NULL, 4, &udp_task, 0);
   // 桌面屏不播现场环境声（用户决定）：无直播音频任务，音频只保留本地提醒音
+  bsp_set_live_band_active(true);  // LVGL flush 裁剪视频带（防越界黑边闪烁）
   // 看门狗只建一次，不归 live_stop 管（它要能重启 live 全套）
   if (!wd_task) {
     last_push_ms = millis();  // 首次启动宽限：从这里起算
@@ -638,6 +639,7 @@ void live_start() {
 void live_stop() {
   live_running = false;
   tcp_active = false;
+  bsp_set_live_band_active(false);  // 直播停：LVGL 可正常绘制视频带（离线遮罩等）
   // 先断流唤醒阻塞中的 read，让任务自行退出，再考虑强杀
   for (int i = 0; i < N_VIDEO_CONNS; i++) {
     if (live_video_streams[i]) live_video_streams[i]->stop();

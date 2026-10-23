@@ -46,9 +46,16 @@ uint16_t *bsp_video_stage_buf() {
 }
 
 static uint32_t flush_total_us = 0, flush_count = 0;
-static volatile uint32_t flush_video_cnt = 0;  // 落在视频带（y=56..256）的 flush 次数
+static volatile uint32_t flush_video_cnt = 0;  // 触及视频带的 flush 次数（裁剪前统计）
 #define LIVE_BAND_Y0 34
 #define LIVE_BAND_Y1 234
+
+// 直播直推期间，LVGL flush 与视频带（y=34..233）相交的部分必须裁掉：
+// LVGL 给文字标签的刷新矩形比字形本身高（实测 y=0..39，越界 5px），不裁会
+// 在视频带顶部画出黑底条，下一帧视频又盖回去 → 每秒闪黑边。直播停（离线）
+// 时不裁，离线遮罩等 LVGL 对象正常绘制。
+static volatile bool live_band_active = false;
+void bsp_set_live_band_active(bool on) { live_band_active = on; }
 
 void bsp_flush_stats(uint32_t *total_us, uint32_t *count) {
   *total_us = flush_total_us;
@@ -67,14 +74,34 @@ uint32_t bsp_flush_video_count() {
 static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
   int64_t t0 = esp_timer_get_time();
   uint32_t w = (area->x2 - area->x1 + 1);
+  uint16_t *px = (uint16_t *)&color_p->full;
+  if (live_band_active && area->y2 >= LIVE_BAND_Y0 && area->y1 < LIVE_BAND_Y1) {
+    // 与视频带相交：只画带外部分（直播直推独占带内像素，画了会闪黑边）
+    flush_video_cnt++;
+    static uint32_t last_spill = 0;
+    if (millis() - last_spill > 5000) {
+      last_spill = millis();
+      rlogf("[FLUSH] clip spill: x=%d..%d y=%d..%d", (int)area->x1, (int)area->x2, (int)area->y1, (int)area->y2);
+    }
+    if (area->y1 < LIVE_BAND_Y0) {  // 带外上半
+      lv_coord_t bot = area->y2 < (LIVE_BAND_Y0 - 1) ? area->y2 : (lv_coord_t)(LIVE_BAND_Y0 - 1);
+      gfx->draw16bitRGBBitmap(area->x1, area->y1, px, w, bot - area->y1 + 1);
+    }
+    if (area->y2 >= LIVE_BAND_Y1) {  // 带外下半（整带跨越的大区域才有）
+      uint32_t skip = LIVE_BAND_Y1 - area->y1;
+      gfx->draw16bitRGBBitmap(area->x1, LIVE_BAND_Y1, px + (size_t)skip * w, w, area->y2 - LIVE_BAND_Y1 + 1);
+    }
+    lv_disp_flush_ready(disp);
+    flush_total_us += (uint32_t)(esp_timer_get_time() - t0);
+    flush_count++;
+    return;
+  }
   uint32_t h = (area->y2 - area->y1 + 1);
   // 面板原生方向（设备侧放）：直接写屏，无转置开销
-  gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
+  gfx->draw16bitRGBBitmap(area->x1, area->y1, px, w, h);
   lv_disp_flush_ready(disp);
   flush_total_us += (uint32_t)(esp_timer_get_time() - t0);
   flush_count++;
-  // 诊断：LVGL 画到视频带（y<240）的次数——直播直推期该值应≈0（闪烁排查）
-  if (area->y1 >= LIVE_BAND_Y0 && area->y1 < LIVE_BAND_Y1) flush_video_cnt++;
 }
 
 static void lvgl_tick_cb(void *arg) { lv_tick_inc(LVGL_TICK_PERIOD_MS); }
