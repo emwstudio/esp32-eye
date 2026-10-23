@@ -396,7 +396,7 @@ static void build_main() {
     snprintf(ub, sizeof(ub), "/ %d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
     lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
-    lv_obj_align_to(unit, cat_counts[i], LV_ALIGN_OUT_RIGHT_BOTTOM, 4, 0);
+    lv_obj_align_to(unit, cat_counts[i], LV_ALIGN_OUT_RIGHT_BOTTOM, 8, 0);
     cat_units[i] = unit;
 
     // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
