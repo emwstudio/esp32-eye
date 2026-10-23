@@ -1,6 +1,7 @@
 #include "camera.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
@@ -23,6 +24,10 @@ static int s_failStreak = 0;
 static int s_restartCount = 0;
 static float s_fps = 0;
 static SemaphoreHandle_t s_frameMutex;
+static SemaphoreHandle_t s_camMutex;  // fb_get 与 deinit/re-init 互斥（fb_get 可能阻塞数秒）
+// 当前采集参数（camHwInit 读取；/config 远程改帧尺寸走 deinit+reinit）
+static framesize_t s_framesize = FRAMESIZE_XGA;
+static int s_quality = 8;
 
 static bool camHwInit() {
   camera_config_t config = {};
@@ -49,8 +54,8 @@ static bool camHwInit() {
   config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = CAM_XCLK_HZ;
   config.pixel_format = PIXFORMAT_JPEG;  // OV5640 on-chip JPEG
-  config.frame_size = FRAMESIZE_XGA;      // 1024x768（画质优先，实测带宽影响）
-  config.jpeg_quality = 8;         // 数值越小画质越好（0-63）
+  config.frame_size = s_framesize;        // 当前采集尺寸（/config 可远程改）
+  config.jpeg_quality = s_quality;  // 数值越小画质越好（0-63）
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
@@ -77,7 +82,8 @@ static void camTask(void *) {
       continue;
     }
 
-    camera_fb_t *fb = esp_camera_fb_get();
+    xSemaphoreTake(s_camMutex, portMAX_DELAY);  // 与 /config 的 deinit/re-init 互斥
+    camera_fb_t *fb = s_ready ? esp_camera_fb_get() : nullptr;
     if (!fb) {
       if (++s_failStreak >= FB_FAIL_REINIT_THRESHOLD) {
         s_failStreak = 0;
@@ -93,9 +99,11 @@ static void camTask(void *) {
           esp_restart();
         }
       }
+      xSemaphoreGive(s_camMutex);
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+    xSemaphoreGive(s_camMutex);
     s_failStreak = 0;
 
     xSemaphoreTake(s_frameMutex, portMAX_DELAY);
@@ -121,15 +129,24 @@ static void camTask(void *) {
 
 bool camInit() {
   s_frameMutex = xSemaphoreCreateMutex();
+  s_camMutex = xSemaphoreCreateMutex();
   s_latest = (uint8_t *)heap_caps_malloc(LATEST_BUF_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_latest) {
     Serial.println("CAM: latest-frame buffer alloc failed");
     return false;
   }
+  // 读取 /config 持久化的采集参数（默认 XGA q8）
+  {
+    Preferences p;
+    p.begin("cam", true);
+    s_framesize = (framesize_t)p.getUChar("fs", FRAMESIZE_XGA);
+    s_quality = p.getUChar("q", 8);
+    p.end();
+  }
   if (!camHwInit()) return false;
   s_ready = true;
   xTaskCreatePinnedToCore(camTask, "cam", 4096, nullptr, 2, nullptr, 1);
-  Serial.println("CAM: init OK (SVGA JPEG, XCLK 20 MHz)");
+  Serial.printf("CAM: init OK (framesize=%d q=%d, XCLK 20 MHz)\n", (int)s_framesize, s_quality);
   return true;
 }
 
@@ -152,28 +169,37 @@ float camFps() { return s_fps; }
 int camFailStreak() { return s_failStreak; }
 int camRestartCount() { return s_restartCount; }
 
-// 运行时调参（/config 远程切换，无需烧录重启）。esp32-camera 的 sensor
-// 设置在 JPEG 模式下即时生效，新帧按新参数出图；帧缓冲上限 256KB，
-// UXGA(1600x1200) q8 实测帧 ~60-120KB 内安全。
+// 运行时调参（/config 远程切换）。帧尺寸切换走"写 NVS + esp_restart"：
+// esp32-camera 的 deinit/re-init 在半状态传感器上不可靠（实测热切换后帧尺寸
+// 不生效，fb_get 持续失败）；重启是 ~10s 的干净路径，流客户端自动重连。
+// 画质热改即时生效，同时写 NVS 保证重启后不丢。
+static void camSavePrefs() {
+  Preferences p;
+  p.begin("cam", false);
+  p.putUChar("fs", (uint8_t)s_framesize);
+  p.putUChar("q", (uint8_t)s_quality);
+  p.end();
+}
+
 bool camSetFrameSize(framesize_t fs) {
-  sensor_t *s = esp_camera_sensor_get();
-  if (!s) return false;
-  return s->set_framesize(s, fs) == 0;
+  if (fs == s_framesize) return true;
+  s_framesize = fs;
+  camSavePrefs();
+  Serial.printf("CAM: framesize -> %d, restarting\n", (int)fs);
+  vTaskDelay(pdMS_TO_TICKS(200));  // 让 HTTP 响应发出去
+  esp_restart();
+  return true;  // 不会到这里
 }
 
 bool camSetQuality(int q) {
   if (q < 0 || q > 63) return false;
   sensor_t *s = esp_camera_sensor_get();
   if (!s) return false;
-  return s->set_quality(s, q) == 0;
+  if (s->set_quality(s, q) != 0) return false;
+  s_quality = q;
+  camSavePrefs();
+  return true;
 }
 
-framesize_t camGetFrameSize() {
-  sensor_t *s = esp_camera_sensor_get();
-  return s ? s->status.framesize : FRAMESIZE_INVALID;
-}
-
-int camGetQuality() {
-  sensor_t *s = esp_camera_sensor_get();
-  return s ? s->status.quality : -1;
-}
+framesize_t camGetFrameSize() { return s_framesize; }
+int camGetQuality() { return s_quality; }

@@ -14,7 +14,7 @@
 #define MAX_STREAMS 2                 // extra clients supersede the oldest one
 #define STREAM_BUF_CAP (256 * 1024 + 160)  // jpeg + header slack
 #define STREAM_HDR_RESERVE 128
-#define STREAM_NOFRAME_TIMEOUT_US 2000000  // no new frame for 2 s -> give up
+#define STREAM_NOFRAME_TIMEOUT_US 6000000  // no new frame for 6 s -> give up（容忍 /config 切分辨率的 ~1s re-init）
 
 typedef struct {
   bool active;
