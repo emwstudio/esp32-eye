@@ -10,7 +10,7 @@
 
 #define WS_AUDIO_PORT 81
 #define WS_AUDIO_PATH "/audio"
-#define FRAME_QUEUE_LEN 4
+#define FRAME_QUEUE_LEN 25  // 500ms 抖动缓冲（服务端繁忙读得慢时吸收，曾 80ms 太短）
 
 static i2s_chan_handle_t s_rxChan;
 static bool s_i2sEnabled = false;
