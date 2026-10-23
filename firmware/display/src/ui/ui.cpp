@@ -56,7 +56,6 @@ static lv_obj_t *scr_main;
 static lv_style_t st_text;
 LV_FONT_DECLARE(font_cjk20);  // 编译进固件的中文字体（tools/gen_font.sh 产物 src/font_cjk20.c）
 LV_FONT_DECLARE(font_cjk24);  // 24px 中文字体（猫名，全字符集防改名豆腐块，src/font_cjk24.c）
-LV_FONT_DECLARE(font_cjk16);  // 16px 辅助文字字体（卡片单位"/ 8次"，src/font_cjk16.c）
 LV_FONT_DECLARE(font_num36);  // 36px 数字字体（猫卡次数大数字用，src/font_num36.c）
 static const lv_font_t *font_cjk = &font_cjk20;
 
@@ -392,11 +391,10 @@ static void build_main() {
     cat_counts[i] = make_label(card, "0");
     lv_obj_set_style_text_font(cat_counts[i], &font_num36, 0);
     lv_obj_set_pos(cat_counts[i], 108, 48);
-    // "/ 8次"（16px 灰）自动贴住数字右缘并底对齐（跟随数字宽度变化）
+    // "/ 8次"（20px 灰）自动贴住数字右缘并底对齐（跟随数字宽度变化）
     char ub[16];
     snprintf(ub, sizeof(ub), "/ %d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
-    lv_obj_set_style_text_font(unit, &font_cjk16, 0);
     lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
     lv_obj_align_to(unit, cat_counts[i], LV_ALIGN_OUT_RIGHT_BOTTOM, 4, 0);
     cat_units[i] = unit;
