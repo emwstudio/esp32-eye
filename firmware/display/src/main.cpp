@@ -67,6 +67,10 @@ static void bootstrap_fn(void *) {
   vTaskDelete(NULL);
 }
 
+// WiFi 连接发起时刻（bootstrap 设置）：health 重连必须等上一次尝试完，
+// 否则 15s 周期的 disconnect 会杀掉 bootstrap 进行中的连接 → 永远连不上
+static volatile uint32_t wifi_attempt_at = 0;
+
 // 周期性健康检查：服务器失联 → 离线页；恢复 → 回主页
 // 离线状态以 g_state.offline_shown（UI 任务维护）为准，bootstrap 与健康任务共享
 static void health_fn(void *) {
@@ -77,6 +81,15 @@ static void health_fn(void *) {
     g_state.wifi_ok = wifi;
     bool offline = g_state.offline_shown;
     xSemaphoreGive(state_mutex);
+    if (!wifi && millis() - wifi_attempt_at > 25000) {
+      // WiFi 断了不会自己回来（bootstrap 失败后尤其如此）：干净地重新发起连接
+      // （25000ms 窗口保护进行中的连接尝试不被误杀）
+      Serial.println("[HEALTH] WiFi 断开，重新发起连接");
+      WiFi.disconnect();
+      delay(100);
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      wifi_attempt_at = millis();
+    }
     bool ok = wifi && rest_health();
     if (!ok && !offline) {
       ui_cmd_set_offline(true, wifi ? "服务器不可达" : "WiFi 断开");
@@ -125,6 +138,15 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   WiFi.setSleep(false);
+  wifi_attempt_at = millis();
+  // WiFi 断开原因诊断（排查连不上的真因：信号/认证/信道）
+  WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      Serial.printf("[WIFI] disconnected, reason=%d\n", info.wifi_sta_disconnected.reason);
+    } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      Serial.printf("[WIFI] got ip %s\n", WiFi.localIP().toString().c_str());
+    }
+  });
 
   Serial.printf("[BOOT] free heap before tasks: %u\n", (unsigned)xPortGetFreeHeapSize());
   BaseType_t r2 = xTaskCreatePinnedToCore(health_fn, "health", 6144, NULL, 2, NULL, 0);

@@ -100,8 +100,15 @@ static void i2s_bus_init() {
 }
 
 // ---- 噪声门状态（writer 任务独占）----
+// PA 联动（模拟底噪必须断功放电源，数字静音没用）：
+//   开门：先 PA 上电 → 稳定 PA_STABLE_MS → 才放开增益斜坡（防"啪"声）
+//   关门：增益斜坡到 0 → 再 PA 断电（先静音后断电，防"啪"声）
+// ES8311 的 DAC soft-mute 会引入自身咔哒声，实测 PA 断电组合更干净，不用 soft-mute。
+#define PA_STABLE_MS 3
 static bool gate_open = false;
 static float gate_gain = 0.0f;             // 0..1 乘法增益（斜坡防爆音）
+static bool pa_on = false;
+static uint32_t pa_on_at = 0;              // PA 上电时刻（稳定期计时）
 static uint32_t below_since = 0;           // RMS 持续低于阈值的起始时刻
 static uint16_t rms_hist[GATE_ADAPT_WIN];  // 每块 RMS 历史（自适应底噪）
 static int rms_hist_i = 0;
@@ -109,11 +116,27 @@ static uint32_t rms_hist_n = 0;
 static uint32_t gate_threshold = GATE_RMS_FLOOR;
 static uint32_t last_gate_log = 0;
 
+static void pa_set(bool on) {
+  if (on == pa_on) return;
+  pa_on = on;
+  digitalWrite(PA_CTRL, on ? HIGH : LOW);
+  if (on) pa_on_at = millis();
+}
+
 static void gate_log(const char *msg, uint32_t rms) {
   // 限频：状态切换日志每分钟最多 3 条
   if (millis() - last_gate_log < 20000) return;
   last_gate_log = millis();
-  rlogf("[GATE] %s rms=%u th=%u", msg, (unsigned)rms, (unsigned)gate_threshold);
+  rlogf("[GATE] %s rms=%u th=%u pa=%d", msg, (unsigned)rms, (unsigned)gate_threshold, (int)pa_on);
+}
+
+// 周期状态打点（60s）：证明音频数据通路活着、门与 PA 的实时状态
+static void gate_periodic_stat(uint32_t rms) {
+  static uint32_t last = 0;
+  if (millis() - last < 60000) return;
+  last = millis();
+  rlogf("[GATE] stat rms=%u th=%u open=%d pa=%d gain=%d%%", (unsigned)rms, (unsigned)gate_threshold,
+        (int)gate_open, (int)pa_on, (int)(gate_gain * 100));
 }
 
 // 每 ~1s 重算一次自适应阈值：阈值 = max(下限, 窗口内最低 RMS × 1.8)
@@ -142,6 +165,7 @@ static void gate_process(int16_t *mono, size_t frames) {
     below_since = 0;
     if (!gate_open) {
       gate_open = true;
+      pa_set(true);  // 先开 PA，稳定期后再放增益
       gate_log("OPEN", rms);
     }
   } else {
@@ -152,7 +176,8 @@ static void gate_process(int16_t *mono, size_t frames) {
     }
   }
 
-  float target = gate_open ? 1.0f : 0.0f;
+  // PA 上电稳定期内增益保持 0；关门时斜坡到 0 后（下方循环外）断电
+  float target = (gate_open && millis() - pa_on_at >= PA_STABLE_MS) ? 1.0f : 0.0f;
   float att = 1.0f / (AUDIO_SAMPLE_RATE * GATE_ATTACK_MS / 1000.0f);
   float rel = 1.0f / (AUDIO_SAMPLE_RATE * GATE_RELEASE_MS / 1000.0f);
   for (size_t i = 0; i < frames; i++) {
@@ -166,11 +191,15 @@ static void gate_process(int16_t *mono, size_t frames) {
     int32_t s = (int32_t)(mono[i] * gate_gain);
     mono[i] = (int16_t)(s > 32767 ? 32767 : (s < -32768 ? -32768 : s));
   }
+  // 斜坡已到底且门已关 → PA 断电（先静音后断电，无爆音）
+  if (!gate_open && gate_gain <= 0.0f && pa_on) pa_set(false);
+  gate_periodic_stat(rms);
 }
 
 static void gate_reset() {
   gate_open = false;
   gate_gain = 0.0f;
+  pa_set(false);  // 流结束/开始：功放断电
   below_since = 0;
   rms_hist_i = 0;
   rms_hist_n = 0;
@@ -225,7 +254,7 @@ bool audio_init() {
   if (!ring) return false;
 
   pinMode(PA_CTRL, OUTPUT);
-  digitalWrite(PA_CTRL, HIGH);  // 功放使能
+  digitalWrite(PA_CTRL, LOW);  // 功放默认断电（噪声门开门时才上电）
 
   i2s_bus_init();
   if (es8311_codec_init() != ESP_OK) {

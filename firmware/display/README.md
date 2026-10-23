@@ -132,3 +132,11 @@ src/
     不到）。升级链：5s 无帧→重注册 UDP+TCP 回退；20s→重启 live 全套；60s→esp_restart。
     UDP 续期失败 5s 重试。STAT 的 fps 只计实际推帧（曾把"处理数"当 fps 导致离线期
     push=0 但 fps=16 的假象）。live_stop 优雅等待 2.5s（强杀会泄漏其 HTTPClient）。
+
+14. **音频噪声门 + PA 联动**（bsp_audio）：数字静音挡不住 ES8311+功放模拟底噪，必须
+    PA_CTRL(GPIO46) 断电。时序：开门先 PA 上电 → 稳定 3ms → 增益斜坡（5ms）放开；
+    关门先斜坡（25ms）到 0 → 再 PA 断电。ES8311 soft-mute 有自身咔哒声，不用。
+    codec 音量 LIVE_VOLUME=51（原 85 的 60%）。门参数全在文件顶部 #define。
+15. **WiFi 重连竞态**：health_fn 的周期重连必须等上一次连接尝试结束（25s 窗口），
+    否则 15s 周期的 disconnect 会杀死 bootstrap 进行中的连接 → 永远连不上。
+    断开诊断：WiFi.onEvent 打 reason 码（2=AUTH_EXPIRE 多为射频/环境问题，等重试即可）。
