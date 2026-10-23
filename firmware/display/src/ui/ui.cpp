@@ -123,10 +123,10 @@ static void banner_set_unknown() {
 // ---------- 猫卡片动画 ----------
 // 每猫主题色（按 cat_id 映射，未知猫用默认绿）
 static lv_color_t theme_color(const String &id) {
-  if (id == "baobao") return lv_color_hex(0xf4a7b9);   // 粉
-  if (id == "bobo") return lv_color_hex(0x6cb5f5);     // 蓝
-  if (id == "qiuqiu") return lv_color_hex(0xb39ddb);   // 紫
-  if (id == "shandian") return lv_color_hex(0xffd54f); // 黄
+  if (id == "baobao") return lv_color_hex(0x6cb5f5);     // 蓝
+  if (id == "bobo") return lv_color_hex(0xf4a7b9);       // 粉
+  if (id == "qiuqiu") return lv_color_hex(0xffd54f);     // 黄
+  if (id == "shandian") return lv_color_hex(0xb39ddb);   // 紫
   return lv_color_hex(0x3fb27f);
 }
 
@@ -266,6 +266,7 @@ static void refresh_cards() {
       lv_obj_clear_flag(cat_cards[i], LV_OBJ_FLAG_HIDDEN);
       lv_color_t theme = theme_color(ids[i]);
       lv_label_set_text(cat_names[i], names[i].c_str());
+      lv_obj_set_style_text_color(cat_counts[i], theme, 0);  // 大数字跟猫的主题色走（呼应头像环）
       char b[8];
       snprintf(b, sizeof(b), "%d", counts[i]);
       lv_label_set_text(cat_counts[i], b);
@@ -382,26 +383,28 @@ static void build_main() {
 
     // 右上：名字
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 110, 4);
+    lv_obj_set_pos(cat_names[i], 108, 8);
 
-    // 右中：小字"今日喝水" + 大号次数数字（32px 数字字体）+ 小字"/8次"，行距留足不叠字
+    // 右中：灰色小字"今日喝水"
     lv_obj_t *today = make_label(card, "今日喝水");
-    lv_obj_set_pos(today, 110, 28);
+    lv_obj_set_pos(today, 108, 32);
     lv_obj_set_style_text_color(today, lv_color_hex(0x8a93a0), 0);
+
+    // 右下：大号次数数字（32px 数字字体，主题色在 refresh_cards 里跟猫走）+ "/8次"底对齐
     cat_counts[i] = make_label(card, "0");
     lv_obj_set_style_text_font(cat_counts[i], &font_num32, 0);
-    lv_obj_set_pos(cat_counts[i], 110, 54);
+    lv_obj_set_pos(cat_counts[i], 108, 54);
     char ub[16];
     snprintf(ub, sizeof(ub), "/%d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
-    lv_obj_set_pos(unit, 152, 62);
+    lv_obj_set_pos(unit, 150, 55);  // 与大数字底部对齐
     lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
 
     // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
     lv_obj_t *bar = lv_bar_create(card);
     cat_bars[i] = bar;
-    lv_obj_set_size(bar, 116, 8);
-    lv_obj_set_pos(bar, 110, 94);
+    lv_obj_set_size(bar, 120, 8);
+    lv_obj_set_pos(bar, 108, 90);
     lv_bar_set_range(bar, 0, DAILY_GOAL);
     lv_bar_set_value(bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_radius(bar, 4, 0);
