@@ -80,7 +80,7 @@ def test_recorder_long_event_audio_aligned_to_video_start(settings):
     for i in range(600):  # 60s @10fps，ring 只留末尾 40s
         ts = base + i * 0.1
         ring.add_frame(VideoFrame(ts=ts, device_ts=None, jpeg=random_jpeg(i)))
-        ring.add_audio(AudioChunk(ts=ts, pcm=b"\x10\x00" * 1600))  # 非零 PCM（100ms/块）
+        ring.add_audio(AudioChunk(ts=ts, pcm=(b"\xff\x7f\x01\x80") * 800))  # 满幅交替（AC 内容，高通后仍在）
 
     event_id = storage.create_event(base)
     storage.finish_event(event_id, base + 55)

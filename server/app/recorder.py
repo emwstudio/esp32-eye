@@ -116,7 +116,9 @@ class Recorder:
             # CRF 18 + medium：接近无损地保留源 JPEG 帧细节（默认 CRF23 会再糊一档）
             args += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
             if pcm_path is not None:
-                args += ["-c:a", "aac", "-shortest"]
+                # 高通 150Hz：碗沿麦克风拾取的 50Hz 工频哼声（市电/泵）很响，
+                # 喝水舔水声在 500Hz+，滤掉低频底噪实测 RMS -27→-33dB
+                args += ["-af", "highpass=f=150", "-c:a", "aac", "-shortest"]
             args.append(str(out_path))
             await _run_ffmpeg(args)
 
