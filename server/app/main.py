@@ -11,9 +11,10 @@ from fastapi import FastAPI, WebSocket
 
 from .api import router
 from .config import Settings, load_settings
-from .detector import DrinkingDetector
+from .detector import DrinkingDetector, GateFn
 from .identifier import Identifier, IdFn
 from .ingest import IngestManager
+from .models_client import VisionModelClient, gate_judge
 from .recorder import Recorder
 from .ringbuffer import RingBuffer
 from .storage import Storage, local_date_str
@@ -50,6 +51,7 @@ class Services:
     def __init__(
         self,
         settings: Settings,
+        gate_fn: GateFn | None = None,
         id_fn: IdFn | None = None,
     ) -> None:
         self.settings = settings
@@ -65,8 +67,16 @@ class Services:
 
         self.udp_live = UdpLivePush(self.ring)
 
+        if gate_fn is None:
+            gate_client = VisionModelClient(
+                base_url=settings.gate_model_base_url,
+                api_key=settings.gate_model_api_key,
+                model=settings.gate_model_name,
+                timeout=30.0,
+            )
+            gate_fn = lambda jpeg: gate_judge(gate_client, jpeg)
         self.detector = DrinkingDetector(
-            settings, self.ring,
+            settings, self.ring, gate_fn,
             on_event_start=self._on_event_start,
             on_event_end=self._on_event_end,
         )
@@ -163,13 +173,14 @@ class Services:
 
 def create_app(
     settings: Settings | None = None,
+    gate_fn: GateFn | None = None,
     id_fn: IdFn | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        services = Services(settings, id_fn=id_fn)
+        services = Services(settings, gate_fn=gate_fn, id_fn=id_fn)
         app.state.services = services
         services.start_background()
         log.info("esp32-eye server started (mock=%s)", settings.use_mock_cam)

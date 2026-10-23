@@ -5,12 +5,16 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 
 
+async def gate_negative(jpeg: bytes):
+    return False, 0.0
+
+
 async def id_mock(frames, refs):
     return "buding", 0.9
 
 
 def make_client(settings):
-    app = create_app(settings, id_fn=id_mock)
+    app = create_app(settings, gate_fn=gate_negative, id_fn=id_mock)
     return TestClient(app)
 
 

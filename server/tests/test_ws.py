@@ -23,10 +23,13 @@ def parse_frames(messages):
 
 
 def test_ws_events_hello_and_event_flow(settings):
+    async def gate_fn(jpeg: bytes):
+        return True, 0.9  # 1B：画面里有猫（占比由 blob 帧保证）
+
     async def id_fn(frames, refs):
         return "buding", 0.86, True
 
-    app = create_app(settings, id_fn=id_fn)
+    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
     with TestClient(app) as client:
         services = app.state.services
         # 停掉 detector 后台轮询，手动喂帧以保证确定性
@@ -153,10 +156,13 @@ def _drive_event(client, services, n_pos=3, n_neg=4):
 
 
 def test_ws_event_discarded_flow(settings):
+    async def gate_fn(jpeg: bytes):
+        return True, 0.9
+
     async def id_fn(frames, refs):
         return "buding", 0.95, False  # 35B 复核：并非在喝水
 
-    app = create_app(settings, id_fn=id_fn)
+    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
     with TestClient(app) as client:
         services = app.state.services
         client.portal.call(services.detector.stop)
@@ -178,10 +184,13 @@ def test_ws_event_discarded_flow(settings):
 def test_ws_event_unknown_then_correct(settings, make_cats):
     make_cats(settings.cats_dir)
 
+    async def gate_fn(jpeg: bytes):
+        return True, 0.9
+
     async def id_fn(frames, refs):
         return "buding", 0.3, True  # 置信度不足
 
-    app = create_app(settings, id_fn=id_fn)
+    app = create_app(settings, gate_fn=gate_fn, id_fn=id_fn)
     with TestClient(app) as client:
         services = app.state.services
         client.portal.call(services.detector.stop)

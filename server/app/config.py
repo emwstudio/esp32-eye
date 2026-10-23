@@ -32,7 +32,8 @@ class Settings:
     id_model_name: str = "MiniCPM-V-4.7-35B-A3B"
     id_model_api_key: str = ""
 
-    occupancy_ratio_threshold: float = 0.35  # 猫占画面比例超过该值判"在喝水"（碗沿机位语义）
+    occupancy_prefilter_ratio: float = 0.15  # 前景占比超过该值才把帧交给 1B 门控（低于则直接否定票）
+    occupancy_ratio_threshold: float = 0.35  # 前景占比超过该值才算"猫占满画面"（与 1B 判定相与）
     gate_interval_s: float = 1.5
     trigger_consecutive: int = 3
     release_consecutive: int = 4
@@ -85,6 +86,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
     s.id_model_base_url = os.getenv("ID_MODEL_BASE_URL", s.id_model_base_url)
     s.id_model_name = os.getenv("ID_MODEL_NAME", s.id_model_name)
     s.id_model_api_key = os.getenv("ID_MODEL_API_KEY", s.id_model_api_key)
+    s.occupancy_prefilter_ratio = float(os.getenv("OCCUPANCY_PREFILTER_RATIO", s.occupancy_prefilter_ratio))
     s.occupancy_ratio_threshold = float(os.getenv("OCCUPANCY_RATIO_THRESHOLD", s.occupancy_ratio_threshold))
     s.gate_interval_s = float(os.getenv("GATE_INTERVAL_S", s.gate_interval_s))
     s.trigger_consecutive = int(os.getenv("TRIGGER_CONSECUTIVE", s.trigger_consecutive))

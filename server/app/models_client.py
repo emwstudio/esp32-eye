@@ -86,11 +86,10 @@ class VisionModelClient:
 
 
 GATE_PROMPT = (
-    "这是一张固定在猫水碗碗沿的摄像头画面（猫凑到碗边时头部会占满画面）。"
-    "问题：画面中是否有猫的头部或身体占据了画面的大部分（超过一半）？"
-    "只回答这个问题本身，不要管猫在做什么。"
+    "这是一张固定在猫水碗碗沿、朝斜上方拍摄的摄像头画面（拍不到水）。"
+    "问题：画面里有没有猫？"
     "只输出一个 JSON 对象，不要输出任何其他文字："
-    '{"is_drinking": true 或 false, "confidence": 0到1之间的数}'
+    '{"cat_present": true 或 false, "confidence": 0到1之间的数}'
 )
 
 ID_PROMPT_TEMPLATE = (
@@ -108,10 +107,16 @@ ID_PROMPT_TEMPLATE = (
 
 
 async def gate_judge(client: VisionModelClient, jpeg: bytes) -> tuple[bool, float]:
-    """第 1 层门控：返回 (is_drinking, confidence)。"""
+    """第 1 层门控（1B 的职责：画面里有没有猫）。返回 (cat_present, confidence)。
+
+    "占没占满画面"不由它判断（实测 1B 不具备空间占比判断能力），
+    占比由检测器的背景差分给出，两者相与才是肯定票。
+    """
     text = await client.chat_with_images(GATE_PROMPT, [jpeg])
     obj = extract_json_object(text)
-    return bool(obj.get("is_drinking")), float(obj.get("confidence", 0.0))
+    present = bool(obj.get("cat_present", obj.get("is_drinking")))
+    conf = float(obj.get("confidence", 0.0))
+    return present, min(conf, 1.0)
 
 
 def build_id_content(
