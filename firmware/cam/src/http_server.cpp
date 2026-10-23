@@ -221,7 +221,8 @@ static esp_err_t healthzHandler(httpd_req_t *req) {
                      "\"stream_clients\":%d,\"stream_frames_sent\":%llu,"
                      "\"stream_errors\":%u,\"last_frame_age_ms\":%lld,"
                      "\"cam_fps\":%.1f,\"cam_frames_total\":%llu,"
-                     "\"cam_fail_streak\":%d,\"cam_restarts\":%d}",
+                     "\"cam_fail_streak\":%d,\"cam_restarts\":%d,"
+                     "\"framesize\":%d,\"quality\":%d}",
                      (unsigned long long)(esp_timer_get_time() / 1000),
                      WiFi.isConnected() ? WiFi.RSSI() : 0,
                      ntpSynced ? "true" : "false",
@@ -235,7 +236,44 @@ static esp_err_t healthzHandler(httpd_req_t *req) {
                      (double)camFps(),
                      (unsigned long long)camFramesTotal(),
                      camFailStreak(),
-                     camRestartCount());
+                     camRestartCount(),
+                     (int)camGetFrameSize(),
+                     camGetQuality());
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body, len);
+}
+
+// GET /config?framesize=xga|uxga&quality=8 —— 运行时远程调参（无需烧录/重启）
+static esp_err_t configHandler(httpd_req_t *req) {
+  char query[64] = {0};
+  char val[16];
+  bool changed = false;
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    if (httpd_query_key_value(query, "framesize", val, sizeof(val)) == ESP_OK) {
+      framesize_t fs = FRAMESIZE_INVALID;
+      if (strcmp(val, "vga") == 0) fs = FRAMESIZE_VGA;
+      else if (strcmp(val, "svga") == 0) fs = FRAMESIZE_SVGA;
+      else if (strcmp(val, "xga") == 0) fs = FRAMESIZE_XGA;
+      else if (strcmp(val, "sxga") == 0) fs = FRAMESIZE_SXGA;
+      else if (strcmp(val, "uxga") == 0) fs = FRAMESIZE_UXGA;
+      if (fs != FRAMESIZE_INVALID && camSetFrameSize(fs)) {
+        changed = true;
+        Serial.printf("HTTP: framesize -> %s\n", val);
+      }
+    }
+    if (httpd_query_key_value(query, "quality", val, sizeof(val)) == ESP_OK) {
+      int q = atoi(val);
+      if (camSetQuality(q)) {
+        changed = true;
+        Serial.printf("HTTP: jpeg quality -> %d\n", q);
+      }
+    }
+  }
+  char body[160];
+  int len = snprintf(body, sizeof(body),
+                     "{\"ok\":%s,\"framesize\":%d,\"quality\":%d}",
+                     changed ? "true" : "false",
+                     (int)camGetFrameSize(), camGetQuality());
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, body, len);
 }
@@ -265,8 +303,11 @@ void httpServerStart() {
     .uri = "/capture", .method = HTTP_GET, .handler = captureHandler, .user_ctx = nullptr};
   const httpd_uri_t healthzUri = {
     .uri = "/healthz", .method = HTTP_GET, .handler = healthzHandler, .user_ctx = nullptr};
+  const httpd_uri_t configUri = {
+    .uri = "/config", .method = HTTP_GET, .handler = configHandler, .user_ctx = nullptr};
   httpd_register_uri_handler(server, &streamUri);
   httpd_register_uri_handler(server, &captureUri);
   httpd_register_uri_handler(server, &healthzUri);
-  Serial.println("HTTP: /stream /capture /healthz on port 80");
+  httpd_register_uri_handler(server, &configUri);
+  Serial.println("HTTP: /stream /capture /healthz /config on port 80");
 }

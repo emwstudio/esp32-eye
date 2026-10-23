@@ -151,3 +151,29 @@ uint64_t camFramesTotal() { return s_framesTotal; }
 float camFps() { return s_fps; }
 int camFailStreak() { return s_failStreak; }
 int camRestartCount() { return s_restartCount; }
+
+// 运行时调参（/config 远程切换，无需烧录重启）。esp32-camera 的 sensor
+// 设置在 JPEG 模式下即时生效，新帧按新参数出图；帧缓冲上限 256KB，
+// UXGA(1600x1200) q8 实测帧 ~60-120KB 内安全。
+bool camSetFrameSize(framesize_t fs) {
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) return false;
+  return s->set_framesize(s, fs) == 0;
+}
+
+bool camSetQuality(int q) {
+  if (q < 0 || q > 63) return false;
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) return false;
+  return s->set_quality(s, q) == 0;
+}
+
+framesize_t camGetFrameSize() {
+  sensor_t *s = esp_camera_sensor_get();
+  return s ? s->status.framesize : FRAMESIZE_INVALID;
+}
+
+int camGetQuality() {
+  sensor_t *s = esp_camera_sensor_get();
+  return s ? s->status.quality : -1;
+}

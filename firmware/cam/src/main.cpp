@@ -14,6 +14,7 @@
 #include "camera.h"
 #include "es7210.h"
 #include "http_server.h"
+#include <ArduinoOTA.h>
 #include "i2c_bus.h"
 
 // CH32 IO expander (0x24): mode / output registers, from the official demo.
@@ -139,12 +140,18 @@ void setup() {
   configTime(0, 0, "pool.ntp.org");  // UTC; audio/video timestamps are epoch us
   Serial.println("NTP: sync started (pool.ntp.org)");
 
+  // OTA 远程升级：板子装在碗沿不好拆，以后固件 WiFi 直推
+  // （pio run -t upload --upload-port catcam.local）
+  ArduinoOTA.setHostname("catcam");
+  ArduinoOTA.begin();
+
   httpServerStart();
   audioStart();
   Serial.println("== boot done ==");
 }
 
 void loop() {
+  ArduinoOTA.handle();
   static uint32_t last = 0;
   if (millis() - last >= 10000) {
     last = millis();

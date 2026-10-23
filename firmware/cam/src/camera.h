@@ -3,6 +3,7 @@
 #include <esp_err.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "esp_camera.h"  // framesize_t
 
 // Camera core: a dedicated capture task owns esp_camera_fb_get() and copies the
 // newest JPEG into a PSRAM "latest frame" slot. HTTP handlers never touch the
@@ -25,3 +26,9 @@ uint64_t camFramesTotal();   // frames captured since boot
 float camFps();              // measured capture rate, 2 s window
 int camFailStreak();         // current consecutive fb_get failures
 int camRestartCount();       // camera re-inits since boot
+
+// 运行时调参（/config 远程切换，无需烧录）：帧尺寸与 JPEG 质量
+bool camSetFrameSize(framesize_t fs);
+bool camSetQuality(int q);          // 0-63，数值越小画质越好
+framesize_t camGetFrameSize();
+int camGetQuality();
