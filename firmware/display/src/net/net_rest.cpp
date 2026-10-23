@@ -136,8 +136,8 @@ static bool avatar_download_decode(const String &cat_id, uint16_t *out) {
   bool ok = got > 0 && decode_avatar(buf, got, out);
   if (ok) {
     // 缓存到 LittleFS
-    if (!LittleFS.exists("/avatars_v2")) LittleFS.mkdir("/avatars_v2");
-    String p = "/avatars_v2/" + cat_id + ".jpg";
+    if (!LittleFS.exists("/avatars_v4")) LittleFS.mkdir("/avatars_v4");
+    String p = "/avatars_v4/" + cat_id + ".jpg";
     File f = LittleFS.open(p, "w");
     if (f) {
       f.write(buf, got);
@@ -162,7 +162,7 @@ bool rest_fetch_cats() {
     CatInfo info;
     info.id = c["id"].as<String>();
     info.name = c["name"].as<String>();
-    info.avatar_path = "/avatars_v2/" + info.id + ".jpg";
+    info.avatar_path = "/avatars_v4/" + info.id + ".jpg";
     auto it = old_counts.find(info.id);
     if (it != old_counts.end()) info.today_count = it->second;
     g_state.cats.push_back(info);
@@ -181,7 +181,7 @@ bool rest_fetch_cats() {
     if (!pixels) continue;
     bool ok = false;
     // 优先 LittleFS 缓存
-    String p = "/avatars_v2/" + id + ".jpg";  // v2：服务端头像修复 EXIF 方向后的一次性缓存迁移
+    String p = "/avatars_v4/" + id + ".jpg";  // v4：四猫新头像（含闪电改名驴驴）强制刷新缓存（v3 在服务端重启前被旧图污染）
     if (LittleFS.exists(p)) {
       File f = LittleFS.open(p, "r");
       size_t len = f.size();
