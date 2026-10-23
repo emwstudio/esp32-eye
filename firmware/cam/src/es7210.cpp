@@ -69,11 +69,12 @@ void es7210Init() {
   // MIC bias 2.87 V
   es7210WriteReg(ES7210_MIC12_BIAS_REG41, 0x70);
   es7210WriteReg(ES7210_MIC34_BIAS_REG42, 0x70);
-  // MIC gain 30 dB (0x10 | 10)
-  es7210WriteReg(ES7210_MIC1_GAIN_REG43, 0x1A);
-  es7210WriteReg(ES7210_MIC2_GAIN_REG44, 0x1A);
-  es7210WriteReg(ES7210_MIC3_GAIN_REG45, 0x1A);
-  es7210WriteReg(ES7210_MIC4_GAIN_REG46, 0x1A);
+  // MIC gain 18 dB（0x10 | 6；原 30dB 是远场语音识别的官方默认值，
+  // 碗沿几厘米的近场不需要——降增益直接压低底噪绝对电平）
+  es7210WriteReg(ES7210_MIC1_GAIN_REG43, 0x16);
+  es7210WriteReg(ES7210_MIC2_GAIN_REG44, 0x16);
+  es7210WriteReg(ES7210_MIC3_GAIN_REG45, 0x16);
+  es7210WriteReg(ES7210_MIC4_GAIN_REG46, 0x16);
   // ADC volume +40 dB (191 + 40*2 = 271 -> 0xFF, as in official 06_esp_sr demo)
   es7210WriteReg(ES7210_ADC1_DIRECT_DB_REG1B, 0xFF);
   es7210WriteReg(ES7210_ADC2_DIRECT_DB_REG1C, 0xFF);
