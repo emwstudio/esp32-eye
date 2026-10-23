@@ -53,6 +53,11 @@ class DrinkingDetector:
         self._last_frame_ts = 0.0
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        # 实测期观测计数（stat_loop 每分钟汇总一次）
+        self._stat_frames = 0
+        self._stat_motion = 0
+        self._stat_gate = 0
+        self._stat_pos = 0
 
     @property
     def in_event(self) -> bool:
@@ -69,16 +74,23 @@ class DrinkingDetector:
 
     async def process_frame(self, jpeg: bytes, ts: float) -> None:
         async with self._lock:
+            self._stat_frames += 1
             if not self.motion_detected(jpeg):
                 return
+            self._stat_motion += 1
             if ts - self._last_gate_ts < self.settings.gate_interval_s:
                 return
             self._last_gate_ts = ts
+            self._stat_gate += 1
             try:
                 is_drinking, conf = await self.gate_fn(jpeg)
             except Exception as e:
                 log.warning("gate model error (counted as negative): %s", e)
                 is_drinking, conf = False, 0.0
+            # 实测期全量留痕：每次门控判定都记（只有运动通过才有，最多 1/1.5s）
+            log.info("gate verdict: drinking=%d conf=%.2f (pos_streak=%d)", is_drinking, conf, self._positive)
+            if is_drinking:
+                self._stat_pos += 1
             self._vote(is_drinking, ts, conf)
 
     def _vote(self, positive: bool, ts: float, conf: float) -> None:
@@ -111,14 +123,29 @@ class DrinkingDetector:
                 await self.process_frame(f.jpeg, f.ts)
             await asyncio.sleep(0.1)
 
+    async def _stat_loop(self) -> None:
+        """实测期观测：每分钟汇总一次各级漏斗（帧→运动→门控→肯定）。"""
+        while True:
+            await asyncio.sleep(60)
+            log.info(
+                "detector stat: frames=%d motion=%d gate=%d pos=%d (in_event=%s)",
+                self._stat_frames, self._stat_motion, self._stat_gate,
+                self._stat_pos, self.event_id,
+            )
+            self._stat_frames = self._stat_motion = self._stat_gate = self._stat_pos = 0
+
     def start(self) -> None:
         self._last_frame_ts = time.time()
         self._task = asyncio.create_task(self._poll_loop())
+        self._stat_task = asyncio.create_task(self._stat_loop())
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for t in (self._task, getattr(self, "_stat_task", None)):
+            if t:
+                t.cancel()
+        for t in (self._task, getattr(self, "_stat_task", None)):
+            if t:
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
