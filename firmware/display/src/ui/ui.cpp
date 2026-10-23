@@ -148,6 +148,34 @@ static void card_pulse(lv_obj_t *card, lv_color_t color) {
   lv_anim_start(&a);
 }
 
+static void card_border_default(lv_obj_t *card) {
+  lv_obj_set_style_border_width(card, 1, 0);
+  lv_obj_set_style_border_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(card, lv_color_hex(0x262d36), 0);
+}
+
+// 确认喝水的高亮：脉冲 3 下后残留淡主题色描边（10s 后恢复默认，避免残留成"永久边框"）
+static lv_timer_t *hl_timers[4] = {NULL, NULL, NULL, NULL};
+
+static void card_highlight(int idx, lv_color_t color) {
+  if (idx < 0 || idx > 3) return;
+  lv_anim_del(cat_cards[idx], card_pulse_cb);
+  if (hl_timers[idx]) { lv_timer_del(hl_timers[idx]); hl_timers[idx] = NULL; }
+  card_pulse(cat_cards[idx], color);
+  hl_timers[idx] = lv_timer_create([](lv_timer_t *t) {
+    for (int i = 0; i < 4; i++) {
+      if (hl_timers[i] == t) {
+        hl_timers[i] = NULL;
+        lv_anim_del(cat_cards[i], card_pulse_cb);
+        card_border_default(cat_cards[i]);
+        break;
+      }
+    }
+    lv_timer_del(t);
+  }, 10000, NULL);
+  lv_timer_set_repeat_count(hl_timers[idx], 1);
+}
+
 static void count_bounce_cb(void *obj, int32_t v) {
   lv_obj_set_style_transform_zoom((lv_obj_t *)obj, v, 0);
 }
@@ -206,7 +234,7 @@ static void banner_set_confirmed(const String &cat_id) {
   }
   xSemaphoreGive(state_mutex);
   if (idx >= 0) {
-    card_pulse(cat_cards[idx], theme_color(cat_id));
+    card_highlight(idx, theme_color(cat_id));
     count_bounce(cat_counts[idx]);
   }
 }
@@ -345,21 +373,26 @@ static void build_main() {
 
     // 右上：名字
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 102, 8);
+    lv_obj_set_pos(cat_names[i], 110, 6);
 
-    // 右中：小字"今日" + 大号次数数字（transform_zoom 1.5x）
-    lv_obj_t *today = make_label(card, "今日");
-    lv_obj_set_pos(today, 102, 44);
+    // 右中：小字"今日喝水" + 大号次数数字（transform_zoom 1.5x）+ 小字"/8次"
+    lv_obj_t *today = make_label(card, "今日喝水");
+    lv_obj_set_pos(today, 110, 38);
     lv_obj_set_style_text_color(today, lv_color_hex(0x8a93a0), 0);
     cat_counts[i] = make_label(card, "0");
-    lv_obj_set_pos(cat_counts[i], 150, 36);
+    lv_obj_set_pos(cat_counts[i], 110, 52);
     lv_obj_set_style_transform_zoom(cat_counts[i], 384, 0);  // 20px -> 30px
+    char ub[16];
+    snprintf(ub, sizeof(ub), "/%d次", DAILY_GOAL);
+    lv_obj_t *unit = make_label(card, ub);
+    lv_obj_set_pos(unit, 144, 62);
+    lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
 
     // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
     lv_obj_t *bar = lv_bar_create(card);
     cat_bars[i] = bar;
-    lv_obj_set_size(bar, 124, 8);
-    lv_obj_set_pos(bar, 102, 92);
+    lv_obj_set_size(bar, 116, 8);
+    lv_obj_set_pos(bar, 110, 92);
     lv_bar_set_range(bar, 0, DAILY_GOAL);
     lv_bar_set_value(bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_radius(bar, 4, 0);
