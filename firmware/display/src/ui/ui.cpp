@@ -55,6 +55,7 @@ void ui_cmd_set_offline(bool off, const char *reason) {
 static lv_obj_t *scr_main;
 static lv_style_t st_text;
 LV_FONT_DECLARE(font_cjk20);  // 编译进固件的中文字体（tools/gen_font.sh 产物 src/font_cjk20.c）
+LV_FONT_DECLARE(font_num32);  // 32px 数字字体（src/font_num32.c，猫卡次数大数字用）
 static const lv_font_t *font_cjk = &font_cjk20;
 
 static lv_obj_t *lbl_clock, *lbl_status;
@@ -181,12 +182,12 @@ static void count_bounce_cb(void *obj, int32_t v) {
 }
 
 static void count_bounce(lv_obj_t *lbl) {
-  // 大号数字常态 zoom=384（1.5x），弹跳冲到 512（2x）再回弹
+  // 大号数字常态 zoom=256（1x），弹跳冲到 320（1.25x）再回弹
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, lbl);
   lv_anim_set_exec_cb(&a, count_bounce_cb);
-  lv_anim_set_values(&a, 384, 512);
+  lv_anim_set_values(&a, 256, 320);
   lv_anim_set_time(&a, 180);
   lv_anim_set_playback_time(&a, 220);
   lv_anim_set_repeat_count(&a, 1);
@@ -299,20 +300,28 @@ static void build_main() {
   lv_obj_set_style_bg_color(scr_main, lv_color_hex(0x101418), 0);
   lv_obj_clear_flag(scr_main, LV_OBJ_FLAG_SCROLLABLE);
 
-  // ---- 标题栏 ----
-  // 左侧时间（往右收 30px，避开圆角）
-  lbl_clock = make_label(scr_main, "--:--");
-  lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 38, 6);
+  // ---- 标题栏（容器裁剪：子元素越界也不会画进视频带）----
+  lv_obj_t *titlebar = lv_obj_create(scr_main);
+  lv_obj_set_size(titlebar, 480, TITLE_H);
+  lv_obj_set_pos(titlebar, 0, 0);
+  lv_obj_set_style_bg_opa(titlebar, LV_OPA_TRANSP, 0);  // 透明底，屏幕底色即标题栏底色
+  lv_obj_set_style_border_width(titlebar, 0, 0);
+  lv_obj_set_style_pad_all(titlebar, 0, 0);
+  lv_obj_clear_flag(titlebar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+  // 左侧时间（往右收 38px，避开圆角）
+  lbl_clock = make_label(titlebar, "--:--");
+  lv_obj_align(lbl_clock, LV_ALIGN_LEFT_MID, 38, 0);
   lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0x9fb3c8), 0);
 
   // 中间大标题
-  lv_obj_t *lbl_title = make_label(scr_main, "猫咪喝水计数器");
-  lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 6);
+  lv_obj_t *lbl_title = make_label(titlebar, "猫咪喝水计数器");
+  lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x9fd3b8), 0);
 
-  // 右侧连接状态点（往左收 30px，避开圆角）
-  lbl_status = make_label(scr_main, "●");
-  lv_obj_align(lbl_status, LV_ALIGN_TOP_RIGHT, -40, 6);
+  // 右侧连接状态点（往左收 40px，避开圆角）
+  lbl_status = make_label(titlebar, "●");
+  lv_obj_align(lbl_status, LV_ALIGN_RIGHT_MID, -40, 0);
   lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xd94f4f), 0);
 
   // 离线遮罩（视频带）
@@ -373,26 +382,26 @@ static void build_main() {
 
     // 右上：名字
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 110, 6);
+    lv_obj_set_pos(cat_names[i], 110, 4);
 
-    // 右中：小字"今日喝水" + 大号次数数字（transform_zoom 1.5x）+ 小字"/8次"
+    // 右中：小字"今日喝水" + 大号次数数字（32px 数字字体，不用缩放）+ 小字"/8次"
     lv_obj_t *today = make_label(card, "今日喝水");
-    lv_obj_set_pos(today, 110, 38);
+    lv_obj_set_pos(today, 110, 32);
     lv_obj_set_style_text_color(today, lv_color_hex(0x8a93a0), 0);
     cat_counts[i] = make_label(card, "0");
-    lv_obj_set_pos(cat_counts[i], 110, 52);
-    lv_obj_set_style_transform_zoom(cat_counts[i], 384, 0);  // 20px -> 30px
+    lv_obj_set_style_text_font(cat_counts[i], &font_num32, 0);
+    lv_obj_set_pos(cat_counts[i], 110, 48);
     char ub[16];
     snprintf(ub, sizeof(ub), "/%d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
-    lv_obj_set_pos(unit, 144, 62);
+    lv_obj_set_pos(unit, 152, 62);
     lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
 
     // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
     lv_obj_t *bar = lv_bar_create(card);
     cat_bars[i] = bar;
     lv_obj_set_size(bar, 116, 8);
-    lv_obj_set_pos(bar, 110, 92);
+    lv_obj_set_pos(bar, 110, 94);
     lv_bar_set_range(bar, 0, DAILY_GOAL);
     lv_bar_set_value(bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_radius(bar, 4, 0);
@@ -408,6 +417,23 @@ static void build_main() {
 
 // ---------- 秒级状态刷新 ----------
 static void sec_tick(lv_timer_t *) {
+  static bool coords_dumped = false;
+  if (!coords_dumped) {  // 一次性诊断：标题栏元素实际坐标（核对是否压到视频带 y>=34）
+    coords_dumped = true;
+    lv_area_t a;
+    lv_obj_update_layout(scr_main);
+    lv_obj_get_coords(lbl_clock, &a);
+    rlogf("[UI] clock coords x=%d..%d y=%d..%d", a.x1, a.x2, a.y1, a.y2);
+    Serial.printf("[UI] clock coords x=%d..%d y=%d..%d\n", a.x1, a.x2, a.y1, a.y2);
+    lv_obj_get_coords(lbl_status, &a);
+    rlogf("[UI] status coords x=%d..%d y=%d..%d", a.x1, a.x2, a.y1, a.y2);
+    Serial.printf("[UI] status coords x=%d..%d y=%d..%d\n", a.x1, a.x2, a.y1, a.y2);
+    if (cat_counts[0]) {
+      lv_obj_get_coords(cat_counts[0], &a);
+      rlogf("[UI] count0 coords x=%d..%d y=%d..%d", a.x1, a.x2, a.y1, a.y2);
+      Serial.printf("[UI] count0 coords x=%d..%d y=%d..%d\n", a.x1, a.x2, a.y1, a.y2);
+    }
+  }
   time_t now = time(NULL);
   struct tm tmv;
   localtime_r(&now, &tmv);

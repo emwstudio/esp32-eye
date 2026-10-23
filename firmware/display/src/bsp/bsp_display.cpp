@@ -47,8 +47,8 @@ uint16_t *bsp_video_stage_buf() {
 
 static uint32_t flush_total_us = 0, flush_count = 0;
 static volatile uint32_t flush_video_cnt = 0;  // 落在视频带（y=56..256）的 flush 次数
-#define LIVE_BAND_Y0 56
-#define LIVE_BAND_Y1 256
+#define LIVE_BAND_Y0 34
+#define LIVE_BAND_Y1 234
 
 void bsp_flush_stats(uint32_t *total_us, uint32_t *count) {
   *total_us = flush_total_us;
