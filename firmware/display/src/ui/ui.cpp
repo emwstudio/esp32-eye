@@ -55,8 +55,8 @@ void ui_cmd_set_offline(bool off, const char *reason) {
 static lv_obj_t *scr_main;
 static lv_style_t st_text;
 LV_FONT_DECLARE(font_cjk20);  // 编译进固件的中文字体（tools/gen_font.sh 产物 src/font_cjk20.c）
-LV_FONT_DECLARE(font_cjk16);  // 16px 辅助文字字体（卡片说明/单位，src/font_cjk16.c）
-LV_FONT_DECLARE(font_num28);  // 28px 数字字体（猫卡次数大数字用，src/font_num28.c）
+LV_FONT_DECLARE(font_cjk16);  // 16px 辅助文字字体（卡片单位"/ 8次"，src/font_cjk16.c）
+LV_FONT_DECLARE(font_num32);  // 32px 数字字体（猫卡次数大数字用，src/font_num32.c）
 static const lv_font_t *font_cjk = &font_cjk20;
 
 static lv_obj_t *lbl_clock, *lbl_status;
@@ -271,8 +271,6 @@ static void refresh_cards() {
       char b[8];
       snprintf(b, sizeof(b), "%d", counts[i]);
       lv_label_set_text(cat_counts[i], b);
-      // "/8次"贴合大数字右缘（按标签实际宽度，不留死距）
-      lv_obj_set_x(cat_units[i], 108 + lv_obj_get_width(cat_counts[i]) + 4);
       // 头像圆环主题色（卡片边框维持极淡底色，脉冲时才上主题色）
       lv_obj_set_style_border_color(lv_obj_get_parent(cat_imgs[i]), theme, 0);
       // 进度条：主题色填充，达标（满格）换金色
@@ -386,24 +384,19 @@ static void build_main() {
 
     // 右上：名字（20px 白）
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 108, 10);
+    lv_obj_set_pos(cat_names[i], 108, 14);
 
-    // 右中：灰色小字"今日喝水"（16px，退到视觉底层）
-    lv_obj_t *today = make_label(card, "今日喝水");
-    lv_obj_set_style_text_font(today, &font_cjk16, 0);
-    lv_obj_set_pos(today, 108, 36);
-    lv_obj_set_style_text_color(today, lv_color_hex(0x8a93a0), 0);
-
-    // 右下：大号次数数字（28px 数字字体，主题色在 refresh_cards 里跟猫走）+ "/8次"（16px）底对齐
+    // 右下：大号次数数字（32px 数字字体，主题色在 refresh_cards 里跟猫走）
     cat_counts[i] = make_label(card, "0");
-    lv_obj_set_style_text_font(cat_counts[i], &font_num28, 0);
-    lv_obj_set_pos(cat_counts[i], 108, 56);
+    lv_obj_set_style_text_font(cat_counts[i], &font_num32, 0);
+    lv_obj_set_pos(cat_counts[i], 108, 48);
+    // "/ 8次"（16px 灰）自动贴住数字右缘并底对齐（跟随数字宽度变化）
     char ub[16];
     snprintf(ub, sizeof(ub), "/ %d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
     lv_obj_set_style_text_font(unit, &font_cjk16, 0);
-    lv_obj_set_pos(unit, 128, 62);  // x 会在 refresh_cards 按数字实际宽度重排（贴合大数字）
     lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
+    lv_obj_align_to(unit, cat_counts[i], LV_ALIGN_OUT_RIGHT_BOTTOM, 4, 0);
     cat_units[i] = unit;
 
     // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
