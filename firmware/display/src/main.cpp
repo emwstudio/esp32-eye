@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include "esp_wifi.h"
 #include <LittleFS.h>
 #include <time.h>
 #include "config.h"
@@ -71,6 +72,21 @@ static void bootstrap_fn(void *) {
 // 否则 15s 周期的 disconnect 会杀掉 bootstrap 进行中的连接 → 永远连不上
 static volatile uint32_t wifi_attempt_at = 0;
 
+// 扫描锁定的目标 AP（同名/隐藏 AP 会同信道干扰认证，按 BSSID 直连更稳）
+static uint8_t g_bssid[6] = {0};
+static int g_channel = 0;
+static bool g_have_bssid = false;
+
+static void wifi_begin() {
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);  // 射频偏弱，拉满发射功率
+  if (g_have_bssid) {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, g_channel, g_bssid);
+  } else {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+  wifi_attempt_at = millis();
+}
+
 // 周期性健康检查：服务器失联 → 离线页；恢复 → 回主页
 // 离线状态以 g_state.offline_shown（UI 任务维护）为准，bootstrap 与健康任务共享
 static void health_fn(void *) {
@@ -87,8 +103,7 @@ static void health_fn(void *) {
       Serial.println("[HEALTH] WiFi 断开，重新发起连接");
       WiFi.disconnect();
       delay(100);
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      wifi_attempt_at = millis();
+      wifi_begin();
     }
     bool ok = wifi && rest_health();
     if (!ok && !offline) {
@@ -136,9 +151,35 @@ void setup() {
   ui_init();
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // CN 频段 ch1-13，与 CAM 板一致（默认地区表发射参数保守，疑似认证帧被路由器忽略的原因之一）
+  wifi_country_t country = {
+    .cc = "CN", .schan = 1, .nchan = 13,
+    .max_tx_power = 0, .policy = WIFI_COUNTRY_POLICY_MANUAL,
+  };
+  esp_wifi_set_country(&country);
+  {
+    // 一次性诊断扫描：看得见哪些 AP，并锁定目标 BSSID（扫描里存在同信道隐藏热点）
+    int n = WiFi.scanNetworks(false, true);
+    Serial.printf("[WIFI-SCAN] found %d APs\n", n);
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+      Serial.printf("[WIFI-SCAN] %s rssi=%d ch=%d enc=%d\n",
+                    WiFi.SSID(i).c_str(), (int)WiFi.RSSI(i), (int)WiFi.channel(i), (int)WiFi.encryptionType(i));
+      if (WiFi.SSID(i) == WIFI_SSID && (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best))) best = i;
+    }
+    if (best >= 0) {
+      memcpy(g_bssid, WiFi.BSSID(best), 6);
+      g_channel = WiFi.channel(best);
+      g_have_bssid = true;
+      const uint8_t *b = WiFi.BSSID(best);
+      Serial.printf("[WIFI-SCAN] 锁定 %s bssid=%02x:%02x:%02x:%02x:%02x:%02x ch=%d\n",
+                    WIFI_SSID, b[0], b[1], b[2], b[3], b[4], b[5], g_channel);
+    }
+    WiFi.scanDelete();
+  }
+  WiFi.setAutoReconnect(true);
+  wifi_begin();
   WiFi.setSleep(false);
-  wifi_attempt_at = millis();
   // WiFi 断开原因诊断（排查连不上的真因：信号/认证/信道）
   WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
     if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {

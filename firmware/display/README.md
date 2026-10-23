@@ -140,3 +140,8 @@ src/
 15. **WiFi 重连竞态**：health_fn 的周期重连必须等上一次连接尝试结束（25s 窗口），
     否则 15s 周期的 disconnect 会杀死 bootstrap 进行中的连接 → 永远连不上。
     断开诊断：WiFi.onEvent 打 reason 码（2=AUTH_EXPIRE 多为射频/环境问题，等重试即可）。
+16. **WiFi 连不上（reason=2 循环）的三件套**（2026-10-23 实录，同网络 CAM 板正常、本板
+    扫到目标 -28dBm 却认证超时）：① esp_wifi_set_country CN ch1-13（与 CAM 板对齐，
+    默认地区表发射参数保守）；② 开机扫描锁定目标 BSSID+信道后按 BSSID 直连
+    （现场存在同信道同强度的隐藏热点，疑似干扰认证）；③ setAutoReconnect(true)。
+    三件套烧入后立即连上，UDP 直播恢复 14-18fps。
