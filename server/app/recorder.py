@@ -88,14 +88,27 @@ class Recorder:
                 log.info("event %d clip audio: %d chunks %.1fs in %.1fs window (%.0f%%)",
                          event_id, len(audio), total_s, win_s, total_s / win_s * 100)
                 pcm = bytearray()
-                cursor = win_start
+                # 音频时间轴对齐视频的实际起点 frames[0].ts，不是事件窗口起点：
+                # 事件长于环形缓冲（40s）时视频只覆盖末尾一段；若从 win_start 起摆，
+                # 前面补的静音会把真实音频推出 -shortest 裁剪点 → 整段无声（48/50 的教训）
+                cursor = frames[0].ts
                 for chunk in sorted(audio, key=lambda c: c.ts):
-                    if chunk.ts > cursor:
-                        gap_samples = int((chunk.ts - cursor) * AUDIO_RATE)
+                    chunk_end = chunk.ts + len(chunk.pcm) / 2 / AUDIO_RATE
+                    if chunk_end <= cursor:
+                        continue  # 整段在视频起点之前，用不上
+                    start = chunk.ts
+                    data = chunk.pcm
+                    if start < cursor:
+                        # 部分重叠：裁掉视频起点之前的部分
+                        cut = int((cursor - start) * AUDIO_RATE) * 2
+                        data = data[cut:]
+                        start = cursor
+                    if start > cursor:
+                        gap_samples = int((start - cursor) * AUDIO_RATE)
                         pcm.extend(b"\x00\x00" * gap_samples)
-                        cursor = chunk.ts
-                    pcm.extend(chunk.pcm)
-                    cursor += len(chunk.pcm) / 2 / AUDIO_RATE
+                        cursor = start
+                    pcm.extend(data)
+                    cursor += len(data) / 2 / AUDIO_RATE
                 pcm_path = tmp_path / "audio.pcm"
                 pcm_path.write_bytes(bytes(pcm))
                 args += ["-f", "s16le", "-ar", str(AUDIO_RATE), "-ac", "1", "-i", str(pcm_path)]

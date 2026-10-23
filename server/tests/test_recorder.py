@@ -61,3 +61,41 @@ def test_recorder_no_frames_returns_none(settings):
 
     assert asyncio.run(recorder.make_clip(event_id, time.time(), time.time())) is None
     assert storage.get_event(event_id)["clip_path"] is None
+
+
+def test_recorder_long_event_audio_aligned_to_video_start(settings):
+    """回归：事件长于环形缓冲时，音频必须对齐视频实际起点而非事件窗口起点。
+
+    曾踩过：80s 事件的录像视频只覆盖末尾 40s，音频从事件起点补静音，
+    -shortest 裁剪后整段无声（48/50 号片段）。
+    """
+    import asyncio
+
+    ring = RingBuffer(seconds=40)
+    storage = Storage(settings.db_path)
+    storage.scan_cats(settings.cats_dir)
+    recorder = Recorder(settings, ring, storage)
+
+    base = time.time() - 60  # 60s 前开始的数据，模拟长事件（ring 只留末尾 40s）
+    for i in range(600):  # 60s @10fps，ring 只留末尾 40s
+        ts = base + i * 0.1
+        ring.add_frame(VideoFrame(ts=ts, device_ts=None, jpeg=random_jpeg(i)))
+        ring.add_audio(AudioChunk(ts=ts, pcm=b"\x10\x00" * 1600))  # 非零 PCM（100ms/块）
+
+    event_id = storage.create_event(base)
+    storage.finish_event(event_id, base + 55)
+    rel = asyncio.run(recorder.make_clip(event_id, base, base + 55))
+    assert rel is not None
+    clip = Path(settings.data_dir.parent) / rel
+
+    # 解出 PCM 验证：有音轨且不全是静音
+    pcm_path = clip.parent / f"{event_id}.pcm"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "quiet", "-i", str(clip), "-f", "s16le", "-ac", "1",
+         "-ar", "16000", str(pcm_path)],
+        check=True,
+    )
+    pcm = pcm_path.read_bytes()
+    assert pcm, "no audio decoded"
+    assert any(b != 0 for b in pcm[:16000]), "clip 开头一秒全静音——音频没对齐到视频起点"
+    pcm_path.unlink()
