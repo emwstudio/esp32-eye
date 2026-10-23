@@ -3,6 +3,7 @@
 #include "net_rest.h"
 #include "state.h"
 #include "ui/ui.h"
+#include "../bsp/bsp_audio.h"
 #include <ArduinoWebsockets.h>
 #include <ArduinoJson.h>
 
@@ -31,6 +32,9 @@ static void handle_message(const String &payload) {
     g_state.pending_cat_id = "";
     xSemaphoreGive(state_mutex);
     ui_cmd_drinking_started(id);  // 不加计数，等 cat_confirmed（契约 §WS 事件）
+    rlogf("[EVT] drinking_started id=%d，播提醒音", id);
+    audio_play_alert();  // 第一时间提醒音（检测到喝水的瞬间）
+    rlogf("[EVT] 提醒音已入队 id=%d", id);
   } else if (type == "cat_confirmed") {
     String cat = doc["cat_id"].as<String>();
     // 契约保证 cat_id 非空；防御性忽略空值/"null"

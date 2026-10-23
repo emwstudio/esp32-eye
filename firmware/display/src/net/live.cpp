@@ -25,11 +25,10 @@
 
 static TaskHandle_t reader_tasks[N_VIDEO_CONNS] = {};
 static TaskHandle_t decode_tasks[2] = {NULL, NULL};
-static TaskHandle_t push_task = NULL, audio_task = NULL, udp_task = NULL;
+static TaskHandle_t push_task = NULL, udp_task = NULL;
 static volatile bool live_running = false;
 static volatile bool tcp_active = false;  // UDP 断流时的 TCP 回退开关
 static WiFiClient *live_video_streams[N_VIDEO_CONNS] = {};
-static WiFiClient *live_audio_stream = NULL;
 
 // ---- 缓冲池（全部 PSRAM）----
 static uint16_t *logical_bufs[N_BUFS] = {NULL, NULL, NULL, NULL};  // 480x240 RGB565
@@ -518,45 +517,6 @@ static void live_video_fn(void *arg) {
   vTaskDelete(NULL);
 }
 
-static void live_audio_fn(void *) {
-  uint8_t *pcm = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-  if (!pcm) pcm = (uint8_t *)malloc(4096);
-  while (live_running) {
-    HTTPClient http;
-    http.setTimeout(5000);
-    if (!http.begin(String(SERVER_BASE) + "/api/live_audio")) break;
-    int code = http.GET();
-    if (code != 200) {
-      http.end();
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      continue;
-    }
-    WiFiClient *s = http.getStreamPtr();
-    live_audio_stream = s;
-    while (live_running && http.connected()) {
-      size_t avail = s->available();
-      if (avail) {
-        int r = s->read(pcm, min(avail, (size_t)4096));
-        if (r <= 0) break;
-        size_t off = 0;
-        while (live_running && off < (size_t)r) {
-          size_t n = audio_stream_write(pcm + off, r - off, 200);
-          if (n == 0) break;  // 缓冲满，丢弃剩余（直播允许丢音频）
-          off += n;
-        }
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(2));
-      }
-    }
-    live_audio_stream = NULL;
-    http.end();
-    if (live_running) vTaskDelay(pdMS_TO_TICKS(2000));
-  }
-  heap_caps_free(pcm);
-  audio_task = NULL;
-  vTaskDelete(NULL);
-}
-
 // 每 30 帧打一次：实测 fps / 双核解码均耗 / 直推（含 DMA）/ 去重数 / 丢帧 / LVGL flush
 static void stat_tick() {
   if (++stat_proc < 30) return;
@@ -664,15 +624,15 @@ void live_start() {
   BaseType_t rd1 = xTaskCreatePinnedToCore(decode_fn, "live_dec1", 8192, (void *)1, 4, &decode_tasks[1], 1);
   // UDP 优先：先起 UDP 接收任务（内含注册/续期/回退监督），5s 无帧才回退 TCP reader
   BaseType_t ru = xTaskCreatePinnedToCore(udp_fn, "live_udp", 6144, NULL, 4, &udp_task, 0);
-  BaseType_t ra = xTaskCreatePinnedToCore(live_audio_fn, "live_a", 4096, NULL, 4, &audio_task, 0);
+  // 桌面屏不播现场环境声（用户决定）：无直播音频任务，音频只保留本地提醒音
   // 看门狗只建一次，不归 live_stop 管（它要能重启 live 全套）
   if (!wd_task) {
     last_push_ms = millis();  // 首次启动宽限：从这里起算
     xTaskCreatePinnedToCore(live_wd_fn, "live_wd", 4096, NULL, 3, &wd_task, 1);
     rlogf("[WD] 看门狗已启动");
   }
-  rlogf("[LIVE] start: push=%ld dec=%ld/%ld udp=%ld au=%ld heap=%u",
-        (long)rp, (long)rd0, (long)rd1, (long)ru, (long)ra, (unsigned)xPortGetFreeHeapSize());
+  rlogf("[LIVE] start: push=%ld dec=%ld/%ld udp=%ld heap=%u",
+        (long)rp, (long)rd0, (long)rd1, (long)ru, (unsigned)xPortGetFreeHeapSize());
 }
 
 void live_stop() {
@@ -682,14 +642,13 @@ void live_stop() {
   for (int i = 0; i < N_VIDEO_CONNS; i++) {
     if (live_video_streams[i]) live_video_streams[i]->stop();
   }
-  if (live_audio_stream) live_audio_stream->stop();
   if (jpeg_q) { JpegItem it{-1, 0, 0}; xQueueSend(jpeg_q, &it, 0); }  // 唤醒解码任务
   if (dec_q) { DecItem di{-1, 0}; xQueueSend(dec_q, &di, 0); }        // 唤醒直推任务
   if (udp_sem) xSemaphoreGive(udp_sem);                               // 唤醒 UDP 任务
   uint32_t t0 = millis();
   bool any = true;
   while (any && millis() - t0 < 2500) {  // 网络任务阻塞中，宽限 2.5s 再强杀（强杀会泄漏其 HTTPClient）
-    any = audio_task || push_task || udp_task;
+    any = push_task || udp_task;
     for (int i = 0; i < N_VIDEO_CONNS; i++) any = any || reader_tasks[i];
     for (int i = 0; i < 2; i++) any = any || decode_tasks[i];
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -703,8 +662,6 @@ void live_stop() {
   }
   if (push_task) { vTaskDelete(push_task); push_task = NULL; }
   if (udp_task) { vTaskDelete(udp_task); udp_task = NULL; }
-  if (audio_task) { vTaskDelete(audio_task); audio_task = NULL; }
   for (int i = 0; i < N_VIDEO_CONNS; i++) live_video_streams[i] = NULL;
-  live_audio_stream = NULL;
   audio_stream_end();
 }

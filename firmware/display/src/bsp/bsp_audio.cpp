@@ -12,12 +12,11 @@
 // 直播音量（codec voice 音量寄存器）：原 85 压低到 60%，避免喇叭把环境底噪放得过大、不削波
 #define LIVE_VOLUME 51  // 0-100
 
-// ---- 噪声门（直播环境底噪抑制：安静时静音，有声音立刻开门）----
-#define GATE_RMS_FLOOR 600    // RMS 阈值下限（int16 绝对值均值）
+// ---- 噪声门（只播本地提醒音：有声开门，静音关门断 PA）----
+#define GATE_RMS_FLOOR 600    // RMS 阈值（int16 绝对值均值；提醒音 RMS 数千，静音≈0）
 #define GATE_HOLD_MS 300      // 低于阈值持续该时长才关门
-#define GATE_ATTACK_MS 5      // 开门斜坡（快，不吞舔水声开头）
+#define GATE_ATTACK_MS 5      // 开门斜坡（快，不吞提示音开头）
 #define GATE_RELEASE_MS 25    // 关门斜坡（慢，防爆音）
-#define GATE_ADAPT_WIN 313    // 底噪自适应窗口（块数；32ms/块 ≈ 10s）
 
 // 环形缓冲 48KB ≈ 1.5s @16kHz/16bit mono
 #define RING_SIZE (48 * 1024)
@@ -100,6 +99,8 @@ static void i2s_bus_init() {
 }
 
 // ---- 噪声门状态（writer 任务独占）----
+// 桌面屏只播本地提醒音（不播现场环境声），门控退化为固定阈值：
+// 有声（提醒音 RMS 数千）开门，静音（RMS≈0）关门后 PA 断电，不做自适应。
 // PA 联动（模拟底噪必须断功放电源，数字静音没用）：
 //   开门：先 PA 上电 → 稳定 PA_STABLE_MS → 才放开增益斜坡（防"啪"声）
 //   关门：增益斜坡到 0 → 再 PA 断电（先静音后断电，防"啪"声）
@@ -110,10 +111,6 @@ static float gate_gain = 0.0f;             // 0..1 乘法增益（斜坡防爆�
 static bool pa_on = false;
 static uint32_t pa_on_at = 0;              // PA 上电时刻（稳定期计时）
 static uint32_t below_since = 0;           // RMS 持续低于阈值的起始时刻
-static uint16_t rms_hist[GATE_ADAPT_WIN];  // 每块 RMS 历史（自适应底噪）
-static int rms_hist_i = 0;
-static uint32_t rms_hist_n = 0;
-static uint32_t gate_threshold = GATE_RMS_FLOOR;
 static uint32_t last_gate_log = 0;
 
 static void pa_set(bool on) {
@@ -127,27 +124,7 @@ static void gate_log(const char *msg, uint32_t rms) {
   // 限频：状态切换日志每分钟最多 3 条
   if (millis() - last_gate_log < 20000) return;
   last_gate_log = millis();
-  rlogf("[GATE] %s rms=%u th=%u pa=%d", msg, (unsigned)rms, (unsigned)gate_threshold, (int)pa_on);
-}
-
-// 周期状态打点（60s）：证明音频数据通路活着、门与 PA 的实时状态
-static void gate_periodic_stat(uint32_t rms) {
-  static uint32_t last = 0;
-  if (millis() - last < 60000) return;
-  last = millis();
-  rlogf("[GATE] stat rms=%u th=%u open=%d pa=%d gain=%d%%", (unsigned)rms, (unsigned)gate_threshold,
-        (int)gate_open, (int)pa_on, (int)(gate_gain * 100));
-}
-
-// 每 ~1s 重算一次自适应阈值：阈值 = max(下限, 窗口内最低 RMS × 1.8)
-static void gate_adapt() {
-  if (rms_hist_n < 31) return;  // 至少 1s 数据
-  uint16_t mn = 0xFFFF;
-  uint32_t n = rms_hist_n < GATE_ADAPT_WIN ? rms_hist_n : GATE_ADAPT_WIN;
-  for (uint32_t i = 0; i < n; i++) {
-    if (rms_hist[i] < mn) mn = rms_hist[i];
-  }
-  gate_threshold = max((uint32_t)GATE_RMS_FLOOR, (uint32_t)(mn * 1.8f));
+  rlogf("[GATE] %s rms=%u pa=%d", msg, (unsigned)rms, (int)pa_on);
 }
 
 // 对一个 mono 块做门控 + 增益斜坡，输出仍是 mono（调用方再转立体声）
@@ -155,12 +132,8 @@ static void gate_process(int16_t *mono, size_t frames) {
   uint32_t acc = 0;
   for (size_t i = 0; i < frames; i++) acc += abs(mono[i]);
   uint16_t rms = frames ? (uint16_t)(acc / frames) : 0;
-  rms_hist[rms_hist_i] = rms;
-  rms_hist_i = (rms_hist_i + 1) % GATE_ADAPT_WIN;
-  rms_hist_n++;
-  if (rms_hist_n % 31 == 0) gate_adapt();
 
-  bool above = rms >= gate_threshold;
+  bool above = rms >= GATE_RMS_FLOOR;
   if (above) {
     below_since = 0;
     if (!gate_open) {
@@ -193,7 +166,6 @@ static void gate_process(int16_t *mono, size_t frames) {
   }
   // 斜坡已到底且门已关 → PA 断电（先静音后断电，无爆音）
   if (!gate_open && gate_gain <= 0.0f && pa_on) pa_set(false);
-  gate_periodic_stat(rms);
 }
 
 static void gate_reset() {
@@ -201,9 +173,6 @@ static void gate_reset() {
   gate_gain = 0.0f;
   pa_set(false);  // 流结束/开始：功放断电
   below_since = 0;
-  rms_hist_i = 0;
-  rms_hist_n = 0;
-  gate_threshold = GATE_RMS_FLOOR;
 }
 
 // 从环形缓冲取 mono 采样，复制成立体声写 I2S；不足时写静音（不计时钟）
@@ -239,6 +208,12 @@ static void writer_fn(void *) {
       samples_out += bytes_written / 4;
       if (samples_out >= samples_in && !stream_active) started = false;
     } else {
+      // 无数据（提示音播完/无流）：关门并断 PA，否则功放上电空开漏模拟底噪
+      if (gate_open || gate_gain > 0.0f || pa_on) {
+        gate_open = false;
+        gate_gain = 0.0f;  // DAC 已在输出静音，此时断 PA 无爆音
+        pa_set(false);
+      }
       // 静音保持总线活跃
       memset(stereo, 0, 64 * 4);
       i2s_write(I2S_PORT, stereo, 64 * 4, &bytes_written, portMAX_DELAY);
