@@ -136,8 +136,8 @@ static bool avatar_download_decode(const String &cat_id, uint16_t *out) {
   bool ok = got > 0 && decode_avatar(buf, got, out);
   if (ok) {
     // 缓存到 LittleFS
-    if (!LittleFS.exists("/avatars_v5")) LittleFS.mkdir("/avatars_v5");
-    String p = "/avatars_v5/" + cat_id + ".jpg";
+    if (!LittleFS.exists("/avatars_v6")) LittleFS.mkdir("/avatars_v6");
+    String p = "/avatars_v6/" + cat_id + ".jpg";
     File f = LittleFS.open(p, "w");
     if (f) {
       f.write(buf, got);
@@ -162,7 +162,7 @@ bool rest_fetch_cats() {
     CatInfo info;
     info.id = c["id"].as<String>();
     info.name = c["name"].as<String>();
-    info.avatar_path = "/avatars_v5/" + info.id + ".jpg";
+    info.avatar_path = "/avatars_v6/" + info.id + ".jpg";
     auto it = old_counts.find(info.id);
     if (it != old_counts.end()) info.today_count = it->second;
     g_state.cats.push_back(info);
@@ -181,7 +181,7 @@ bool rest_fetch_cats() {
     if (!pixels) continue;
     bool ok = false;
     // 优先 LittleFS 缓存
-    String p = "/avatars_v5/" + id + ".jpg";  // v5：啵啵换新头像
+    String p = "/avatars_v6/" + id + ".jpg";  // v6：啵啵再换新头像
     if (LittleFS.exists(p)) {
       File f = LittleFS.open(p, "r");
       size_t len = f.size();
