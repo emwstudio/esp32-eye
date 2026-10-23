@@ -61,7 +61,7 @@ static const lv_font_t *font_cjk = &font_cjk20;
 static lv_obj_t *lbl_clock, *lbl_status;
 static lv_obj_t *offline_mask, *offline_lbl;
 static lv_obj_t *banner, *banner_lbl;
-static lv_obj_t *cat_cards[4], *cat_imgs[4], *cat_names[4], *cat_counts[4];
+static lv_obj_t *cat_cards[4], *cat_imgs[4], *cat_names[4], *cat_counts[4], *cat_units[4];
 static lv_obj_t *home_empty;
 
 // 标题栏独立后视频带内无任何 LVGL 对象，直推整块写屏（无需挖洞/逐帧 invalidate）
@@ -270,6 +270,8 @@ static void refresh_cards() {
       char b[8];
       snprintf(b, sizeof(b), "%d", counts[i]);
       lv_label_set_text(cat_counts[i], b);
+      // "/8次"贴合大数字右缘（按标签实际宽度，不留死距）
+      lv_obj_set_x(cat_units[i], 108 + lv_obj_get_width(cat_counts[i]) + 4);
       // 头像圆环主题色（卡片边框维持极淡底色，脉冲时才上主题色）
       lv_obj_set_style_border_color(lv_obj_get_parent(cat_imgs[i]), theme, 0);
       // 进度条：主题色填充，达标（满格）换金色
@@ -397,8 +399,9 @@ static void build_main() {
     char ub[16];
     snprintf(ub, sizeof(ub), "/%d次", DAILY_GOAL);
     lv_obj_t *unit = make_label(card, ub);
-    lv_obj_set_pos(unit, 150, 55);  // 与大数字底部对齐
+    lv_obj_set_pos(unit, 128, 55);  // x 会在 refresh_cards 按数字实际宽度重排（贴合大数字）
     lv_obj_set_style_text_color(unit, lv_color_hex(0x8a93a0), 0);
+    cat_units[i] = unit;
 
     // 底部：细进度条（今日次数 / DAILY_GOAL，圆角轨道，主题色填充，满格金色）
     lv_obj_t *bar = lv_bar_create(card);
