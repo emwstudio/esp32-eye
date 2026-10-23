@@ -77,6 +77,8 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *txt) {
 }
 
 // ---------- 横幅（视频区顶部细条）----------
+// 慢动作诊断开关：排查"卡片下方绿色绘制"用（已定位：横幅 z 序在卡片之下）
+#define ANIM_SLOWMO 1
 static void banner_anim_y(void *obj, int32_t v) { lv_obj_set_y((lv_obj_t *)obj, v); }
 
 static void banner_show(const char *text) {
@@ -86,7 +88,7 @@ static void banner_show(const char *text) {
   lv_anim_set_var(&a, banner);
   lv_anim_set_exec_cb(&a, banner_anim_y);
   lv_anim_set_values(&a, 480, 260);  // 从屏外下方滑到视频带下缘（浮在猫卡区顶部）
-  lv_anim_set_time(&a, 250);
+  lv_anim_set_time(&a, 250 * ANIM_SLOWMO);
   lv_anim_start(&a);
 }
 
@@ -96,7 +98,7 @@ static void banner_hide() {
   lv_anim_set_var(&a, banner);
   lv_anim_set_exec_cb(&a, banner_anim_y);
   lv_anim_set_values(&a, lv_obj_get_y(banner), 480);
-  lv_anim_set_time(&a, 220);
+  lv_anim_set_time(&a, 220 * ANIM_SLOWMO);
   lv_anim_start(&a);
 }
 
@@ -144,8 +146,8 @@ static void card_pulse(lv_obj_t *card, lv_color_t color) {
   lv_anim_set_var(&a, card);
   lv_anim_set_exec_cb(&a, card_pulse_cb);
   lv_anim_set_values(&a, 0, 100);
-  lv_anim_set_time(&a, 350);
-  lv_anim_set_playback_time(&a, 350);
+  lv_anim_set_time(&a, 350 * ANIM_SLOWMO);
+  lv_anim_set_playback_time(&a, 350 * ANIM_SLOWMO);
   lv_anim_set_repeat_count(&a, 3);
   lv_anim_start(&a);
 }
@@ -415,6 +417,10 @@ static void build_main() {
   home_empty = make_label(scr_main, "等待猫咪档案…");
   lv_obj_align(home_empty, LV_ALIGN_BOTTOM_MID, 0, -100);
   lv_obj_add_flag(home_empty, LV_OBJ_FLAG_HIDDEN);
+
+  // 横幅浮到最顶层（它在卡片之前创建，不提层会压在卡片下面，
+  // 滑动时只能从卡片缝隙透出绿边——曾被看作"卡片下方绿色花屏"）
+  lv_obj_move_foreground(banner);
 }
 
 // ---------- 秒级状态刷新 ----------
