@@ -55,8 +55,9 @@ void ui_cmd_set_offline(bool off, const char *reason) {
 static lv_obj_t *scr_main;
 static lv_style_t st_text;
 LV_FONT_DECLARE(font_cjk20);  // 编译进固件的中文字体（tools/gen_font.sh 产物 src/font_cjk20.c）
+LV_FONT_DECLARE(font_cjk24);  // 24px 中文字体（猫名，全字符集防改名豆腐块，src/font_cjk24.c）
 LV_FONT_DECLARE(font_cjk16);  // 16px 辅助文字字体（卡片单位"/ 8次"，src/font_cjk16.c）
-LV_FONT_DECLARE(font_num32);  // 32px 数字字体（猫卡次数大数字用，src/font_num32.c）
+LV_FONT_DECLARE(font_num36);  // 36px 数字字体（猫卡次数大数字用，src/font_num36.c）
 static const lv_font_t *font_cjk = &font_cjk20;
 
 static lv_obj_t *lbl_clock, *lbl_status;
@@ -382,13 +383,14 @@ static void build_main() {
     lv_obj_center(cat_imgs[i]);
     lv_obj_add_flag(cat_imgs[i], LV_OBJ_FLAG_HIDDEN);
 
-    // 右上：名字（20px 白）
+    // 右上：名字（24px 白）
     cat_names[i] = make_label(card, "");
-    lv_obj_set_pos(cat_names[i], 108, 14);
+    lv_obj_set_style_text_font(cat_names[i], &font_cjk24, 0);
+    lv_obj_set_pos(cat_names[i], 108, 10);
 
-    // 右下：大号次数数字（32px 数字字体，主题色在 refresh_cards 里跟猫走）
+    // 右下：大号次数数字（36px 数字字体，主题色在 refresh_cards 里跟猫走）
     cat_counts[i] = make_label(card, "0");
-    lv_obj_set_style_text_font(cat_counts[i], &font_num32, 0);
+    lv_obj_set_style_text_font(cat_counts[i], &font_num36, 0);
     lv_obj_set_pos(cat_counts[i], 108, 48);
     // "/ 8次"（16px 灰）自动贴住数字右缘并底对齐（跟随数字宽度变化）
     char ub[16];
