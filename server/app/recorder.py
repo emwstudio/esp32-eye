@@ -50,6 +50,8 @@ class Recorder:
             log.warning("event %d: no frames in ring buffer, clip skipped", event_id)
             return None
         audio = self.ring.audio_between(win_start, win_end)
+        if not audio:
+            log.warning("event %d: NO audio chunks in clip window — 片段将无声（查音频 WS 链路）", event_id)
 
         day = local_date_str(start_ts)
         out_dir = s.clips_dir / day
@@ -80,6 +82,11 @@ class Recorder:
             pcm_path: Path | None = None
             if audio:
                 # 按时间戳对齐：块间空隙补静音
+                total_s = sum(len(c.pcm) for c in audio) / 2 / AUDIO_RATE
+                win_s = win_end - win_start
+                # 音频留痕：无声片段排查用（48 号片段全静音事件的教训）
+                log.info("event %d clip audio: %d chunks %.1fs in %.1fs window (%.0f%%)",
+                         event_id, len(audio), total_s, win_s, total_s / win_s * 100)
                 pcm = bytearray()
                 cursor = win_start
                 for chunk in sorted(audio, key=lambda c: c.ts):

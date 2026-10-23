@@ -139,12 +139,17 @@ class CamIngest:
         backoff = BACKOFF_MIN
         while True:
             try:
-                async with websockets.connect(resolve_local_host(url), max_size=None, compression=None, proxy=None) as ws:
+                # ping_interval=None：禁用 websockets 的 ping 看门狗——CAM 高负载时
+                # pong 延迟会被误判死链，造成周期性掉线（实测每 ~2min 一次，录音留空洞）。
+                # 改用数据停滞看门狗：8s 没收到音频块才重连。
+                async with websockets.connect(resolve_local_host(url), max_size=None, compression=None,
+                                              proxy=None, ping_interval=None) as ws:
                     self.audio_connected = True
                     self._device_ts_warned = False  # 每次重连后重新判定 NTP 同步
                     log.info("cam audio stream connected: %s", url)
                     backoff = BACKOFF_MIN
-                    async for msg in ws:
+                    while True:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=8)
                         if isinstance(msg, str) or len(msg) < 8:
                             continue
                         (device_ts,) = struct.unpack("<Q", msg[:8])
