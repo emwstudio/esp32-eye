@@ -14,6 +14,7 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from .mock_cam import AUDIO_RATE
+from .config import resolve_binary
 
 if TYPE_CHECKING:
     from .main import Services
@@ -277,9 +278,13 @@ class _IndexedFrames:
         return ts, payload
 
 
+FFMPEG = resolve_binary("ffmpeg")
+FFPROBE = resolve_binary("ffprobe")
+
+
 async def _ffprobe(args: list[str]) -> str:
     proc = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "quiet", *args,
+        FFPROBE, "-v", "quiet", *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     out, _ = await proc.communicate()
@@ -313,14 +318,14 @@ async def ws_clip(ws: WebSocket, event_id: int) -> None:
         return
 
     video_proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-nostdin", "-i", str(clip_path),
+        FFMPEG, "-nostdin", "-i", str(clip_path),
         "-vf", f"scale={CLIP_SIZE}:{CLIP_SIZE},fps={CLIP_FPS}",
         "-f", "image2pipe", "-vcodec", "mjpeg", "-",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     if await _clip_has_audio(clip_path):
         audio_cmd = [
-            "ffmpeg", "-nostdin", "-i", str(clip_path), "-vn",
+            FFMPEG, "-nostdin", "-i", str(clip_path), "-vn",
             "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(AUDIO_RATE), "-ac", "1", "-",
         ]
     else:
@@ -328,7 +333,7 @@ async def ws_clip(ws: WebSocket, event_id: int) -> None:
         # 保证 display 端"音频为时钟"假设恒成立
         duration = await _clip_duration_s(clip_path)
         audio_cmd = [
-            "ffmpeg", "-nostdin", "-f", "lavfi", "-t", f"{duration:.3f}",
+            FFMPEG, "-nostdin", "-f", "lavfi", "-t", f"{duration:.3f}",
             "-i", f"anullsrc=r={AUDIO_RATE}:cl=mono",
             "-f", "s16le", "-acodec", "pcm_s16le", "-",
         ]

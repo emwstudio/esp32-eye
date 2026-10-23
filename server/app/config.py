@@ -2,10 +2,22 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+def resolve_binary(name: str) -> str:
+    """launchd 等服务环境 PATH 极简（不含 Homebrew），找不到时按常见安装路径回退。"""
+    found = shutil.which(name)
+    if found:
+        return found
+    for p in (f"/opt/homebrew/bin/{name}", f"/usr/local/bin/{name}"):
+        if Path(p).exists():
+            return p
+    return name
 
 SERVER_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = SERVER_ROOT.parent

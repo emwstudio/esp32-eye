@@ -7,17 +7,20 @@ import statistics
 import tempfile
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, resolve_binary
 from .mock_cam import AUDIO_RATE
 from .ringbuffer import RingBuffer
 from .storage import Storage, local_date_str
 
 log = logging.getLogger(__name__)
 
+# launchd 常驻环境 PATH 极简，找不到 Homebrew 的 ffmpeg——启动时解析一次
+FFMPEG = resolve_binary("ffmpeg")
+
 
 async def _run_ffmpeg(args: list[str]) -> None:
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-nostdin", *args,
+        FFMPEG, "-nostdin", *args,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
