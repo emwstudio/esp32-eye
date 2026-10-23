@@ -314,12 +314,12 @@ static void build_main() {
   // 左侧时间（往右收 38px，避开圆角）
   lbl_clock = make_label(titlebar, "--:--");
   lv_obj_align(lbl_clock, LV_ALIGN_LEFT_MID, 38, 0);
-  lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0x9fb3c8), 0);
+  lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xd6e0ea), 0);  // 与标题统一浅灰白
 
   // 中间大标题
-  lv_obj_t *lbl_title = make_label(titlebar, "猫咪喝水计数器");
+  lv_obj_t *lbl_title = make_label(titlebar, "猫咪每日喝水计数器");
   lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x9fd3b8), 0);
+  lv_obj_set_style_text_color(lbl_title, lv_color_hex(0xd6e0ea), 0);
 
   // 右侧连接状态点（往左收 40px，避开圆角）
   lbl_status = make_label(titlebar, "●");
