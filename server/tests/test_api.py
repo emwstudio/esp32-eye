@@ -1,7 +1,9 @@
+import subprocess
 import time
 
 from fastapi.testclient import TestClient
 
+from app.config import resolve_binary
 from app.main import create_app
 
 
@@ -95,3 +97,43 @@ def test_correct_event(settings, make_cats):
         # 不存在的 event / cat → 404
         assert client.post("/api/events/9999/correct", json={"cat_id": "naigai"}).status_code == 404
         assert client.post(f"/api/events/{event_id}/correct", json={"cat_id": "ghost"}).status_code == 404
+
+
+def test_demo_band_streams_jpeg_and_requires_video(settings):
+    video = settings.data_dir / "demo_loop.mp4"
+    with make_client(settings) as client:
+        assert client.get("/api/demo_band").status_code == 404
+        subprocess.run(
+            [
+                resolve_binary("ffmpeg"), "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=64x48:rate=2:duration=0.5",
+                "-pix_fmt", "yuv420p", str(video),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        response = client.get("/api/demo_band", params={"frames": 1})
+        assert response.status_code == 200
+        assert response.content.count(b"\xff\xd8") == 1
+        assert response.content.count(b"\xff\xd9") == 1
+
+
+def test_demo_audio_streams_pcm_and_requires_video(settings):
+    video = settings.data_dir / "demo_loop.mp4"
+    with make_client(settings) as client:
+        assert client.get("/api/demo_audio").status_code == 404
+        subprocess.run(
+            [
+                resolve_binary("ffmpeg"), "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=64x48:rate=2:duration=0.5",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000:duration=0.5",
+                "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        response = client.get("/api/demo_audio", params={"chunks": 2})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/octet-stream"
+        assert len(response.content) == 1280
+        assert any(response.content)

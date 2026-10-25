@@ -1,5 +1,6 @@
 #include "bsp_audio.h"
 #include "board_pins.h"
+#include "config.h"
 #include "net/rlog.h"
 #include "driver/i2s.h"
 #include "esp_check.h"
@@ -199,7 +200,11 @@ static void writer_fn(void *) {
     size_t frames = got / 2;
     size_t bytes_written = 0;
     if (frames > 0) {
+#if DEMO_MODE
+      if (!pa_on) pa_set(true);  // 演示原声不做噪声门，避免安静喝水声被切碎
+#else
       gate_process(mono, frames);  // 噪声门：安静时渐入静音，有声立刻开门
+#endif
       for (size_t i = 0; i < frames; i++) {
         stereo[2 * i] = mono[i];
         stereo[2 * i + 1] = mono[i];
@@ -208,12 +213,16 @@ static void writer_fn(void *) {
       samples_out += bytes_written / 4;
       if (samples_out >= samples_in && !stream_active) started = false;
     } else {
+#if DEMO_MODE
+      if (!stream_active && pa_on) pa_set(false);
+#else
       // 无数据（提示音播完/无流）：关门并断 PA，否则功放上电空开漏模拟底噪
       if (gate_open || gate_gain > 0.0f || pa_on) {
         gate_open = false;
         gate_gain = 0.0f;  // DAC 已在输出静音，此时断 PA 无爆音
         pa_set(false);
       }
+#endif
       // 静音保持总线活跃
       memset(stereo, 0, 64 * 4);
       i2s_write(I2S_PORT, stereo, 64 * 4, &bytes_written, portMAX_DELAY);

@@ -25,10 +25,11 @@
 
 static TaskHandle_t reader_tasks[N_VIDEO_CONNS] = {};
 static TaskHandle_t decode_tasks[2] = {NULL, NULL};
-static TaskHandle_t push_task = NULL, udp_task = NULL;
+static TaskHandle_t push_task = NULL, audio_task = NULL, udp_task = NULL;
 static volatile bool live_running = false;
 static volatile bool tcp_active = false;  // UDP 断流时的 TCP 回退开关
 static WiFiClient *live_video_streams[N_VIDEO_CONNS] = {};
+static WiFiClient *live_audio_stream = NULL;
 
 // ---- 缓冲池（全部 PSRAM）----
 static uint16_t *logical_bufs[N_BUFS] = {NULL, NULL, NULL, NULL};  // 480x240 RGB565
@@ -111,7 +112,12 @@ static void stat_tick();  // 前向声明
 
 // ---- 直播看门狗（自愈：永远在线是产品目标）----
 static volatile uint32_t last_push_ms = 0;  // 最后一次实际推帧上屏
+static volatile uint32_t last_ui_heartbeat_ms = 0;
 static TaskHandle_t wd_task = NULL;
+
+void live_ui_heartbeat() {
+  last_ui_heartbeat_ms = millis();
+}
 
 static void decode_fn(void *arg) {
   int core_id = (int)(intptr_t)arg;
@@ -456,13 +462,18 @@ static void live_video_fn(void *arg) {
   if (!rx) rx = (uint8_t *)malloc(4096);
   MjpegExtractor ext;
   ext.init(jpeg, JPEG_CAP);
+#if DEMO_MODE
+  const char *stream_path = DEMO_VIDEO_PATH;
+#else
+  const char *stream_path = "/api/live_band?h=200";
+#endif
   while (live_running && tcp_active) {
     HTTPClient http;
     http.setTimeout(5000);
-    if (!http.begin(String(SERVER_BASE) + "/api/live_band?h=200")) break;
+    if (!http.begin(String(SERVER_BASE) + stream_path)) break;
     int code = http.GET();
     if (code != 200) {
-      rlogf("[LIVE%d] GET /api/live_band -> %d", conn, code);
+      rlogf("[LIVE%d] GET %s -> %d", conn, stream_path, code);
       http.end();
       vTaskDelay(pdMS_TO_TICKS(2000));
       continue;
@@ -517,6 +528,58 @@ static void live_video_fn(void *arg) {
   vTaskDelete(NULL);
 }
 
+#if DEMO_MODE
+static void live_audio_fn(void *) {
+  uint8_t *pcm = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  if (!pcm) pcm = (uint8_t *)malloc(4096);
+  while (live_running) {
+    HTTPClient http;
+    http.setTimeout(5000);
+    if (!http.begin(String(SERVER_BASE) + DEMO_AUDIO_PATH)) break;
+    int code = http.GET();
+    if (code != 200) {
+      rlogf("[DEMO-AUDIO] GET -> %d", code);
+      http.end();
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      continue;
+    }
+    WiFiClient *s = http.getStreamPtr();
+    s->setNoDelay(true);
+    live_audio_stream = s;
+    rlogf("[DEMO-AUDIO] connected");
+    uint32_t last_rx = millis();
+    size_t carry = 0;
+    while (live_running && http.connected()) {
+      size_t avail = s->available();
+      if (!avail) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+        if (millis() - last_rx > 5000) break;
+        continue;
+      }
+      int r = s->read(pcm + carry, min(avail, (size_t)4096 - carry));
+      if (r <= 0) break;
+      last_rx = millis();
+      size_t total = carry + (size_t)r;
+      size_t even = total & ~((size_t)1);
+      size_t off = 0;
+      while (live_running && off < even) {
+        size_t n = audio_stream_write(pcm + off, even - off, 200);
+        if (n == 0) break;
+        off += n;
+      }
+      carry = off == even ? total - even : 0;
+      if (carry) pcm[0] = pcm[even];
+    }
+    live_audio_stream = NULL;
+    http.end();
+    if (live_running) vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+  heap_caps_free(pcm);
+  audio_task = NULL;
+  vTaskDelete(NULL);
+}
+#endif
+
 // 每 30 帧打一次：实测 fps / 双核解码均耗 / 直推（含 DMA）/ 去重数 / 丢帧 / LVGL flush
 static void stat_tick() {
   if (++stat_proc < 30) return;
@@ -557,6 +620,12 @@ static void live_wd_fn(void *) {
   uint32_t outage_since = 0;  // 持续无帧的起点（只有实际推帧才清零，L2 重启不清它）
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(1000));
+    uint32_t ui_idle = millis() - last_ui_heartbeat_ms;
+    if (last_ui_heartbeat_ms && ui_idle > 20000) {
+      rlogf("[WD] UI: %ums 无主循环心跳，esp_restart heap=%u", (unsigned)ui_idle, (unsigned)xPortGetFreeHeapSize());
+      vTaskDelay(pdMS_TO_TICKS(300));
+      esp_restart();
+    }
     if (!live_running) {
       level = 0;
       outage_since = 0;
@@ -582,7 +651,9 @@ static void live_wd_fn(void *) {
     } else if (idle > 5000 && level < 1) {
       level = 1;
       rlogf("[WD] L1: %ums 无帧，重注册 UDP + 确保 TCP 回退", (unsigned)idle);
+#if !DEMO_MODE
       udp_register(false);
+#endif
       if (!reader_tasks[0]) {  // udp_fn 若死了，这里兜底直接拉 TCP
         tcp_active = true;
         BaseType_t r = xTaskCreatePinnedToCore(live_video_fn, "live_v0", 5120, (void *)0, 4, &reader_tasks[0], 0);
@@ -595,7 +666,11 @@ static void live_wd_fn(void *) {
 void live_start() {
   live_stop();
   live_running = true;
+#if DEMO_MODE
+  tcp_active = true;
+#else
   tcp_active = false;
+#endif
   audio_stream_begin();
   for (int i = 0; i < N_BUFS; i++) {
     if (!logical_bufs[i]) logical_bufs[i] = (uint16_t *)heap_caps_malloc(LIVE_W * LIVE_H * 2, MALLOC_CAP_SPIRAM);
@@ -622,14 +697,19 @@ void live_start() {
   BaseType_t rp = xTaskCreatePinnedToCore(push_fn, "live_push", 6144, NULL, 4, &push_task, 1);
   BaseType_t rd0 = xTaskCreatePinnedToCore(decode_fn, "live_dec0", 8192, (void *)0, 4, &decode_tasks[0], 0);
   BaseType_t rd1 = xTaskCreatePinnedToCore(decode_fn, "live_dec1", 8192, (void *)1, 4, &decode_tasks[1], 1);
+#if DEMO_MODE
+  BaseType_t ru = xTaskCreatePinnedToCore(live_video_fn, "live_v0", 5120, (void *)0, 4, &reader_tasks[0], 0);
+  // 演示视频静音：不启动音频接收，只保留本地喝水提醒音
+#else
   // UDP 优先：先起 UDP 接收任务（内含注册/续期/回退监督），5s 无帧才回退 TCP reader
   BaseType_t ru = xTaskCreatePinnedToCore(udp_fn, "live_udp", 6144, NULL, 4, &udp_task, 0);
-  // 桌面屏不播现场环境声（用户决定）：无直播音频任务，音频只保留本地提醒音
+  // 正式模式不播现场环境声，音频只保留本地提醒音
+#endif
   bsp_set_live_band_active(true);  // LVGL flush 裁剪视频带（防越界黑边闪烁）
   // 看门狗只建一次，不归 live_stop 管（它要能重启 live 全套）
   if (!wd_task) {
     last_push_ms = millis();  // 首次启动宽限：从这里起算
-    xTaskCreatePinnedToCore(live_wd_fn, "live_wd", 4096, NULL, 3, &wd_task, 1);
+    xTaskCreatePinnedToCore(live_wd_fn, "live_wd", 4096, NULL, configMAX_PRIORITIES - 1, &wd_task, 1);
     rlogf("[WD] 看门狗已启动");
   }
   rlogf("[LIVE] start: push=%ld dec=%ld/%ld udp=%ld heap=%u",
@@ -644,13 +724,14 @@ void live_stop() {
   for (int i = 0; i < N_VIDEO_CONNS; i++) {
     if (live_video_streams[i]) live_video_streams[i]->stop();
   }
+  if (live_audio_stream) live_audio_stream->stop();
   if (jpeg_q) { JpegItem it{-1, 0, 0}; xQueueSend(jpeg_q, &it, 0); }  // 唤醒解码任务
   if (dec_q) { DecItem di{-1, 0}; xQueueSend(dec_q, &di, 0); }        // 唤醒直推任务
   if (udp_sem) xSemaphoreGive(udp_sem);                               // 唤醒 UDP 任务
   uint32_t t0 = millis();
   bool any = true;
   while (any && millis() - t0 < 2500) {  // 网络任务阻塞中，宽限 2.5s 再强杀（强杀会泄漏其 HTTPClient）
-    any = push_task || udp_task;
+    any = push_task || audio_task || udp_task;
     for (int i = 0; i < N_VIDEO_CONNS; i++) any = any || reader_tasks[i];
     for (int i = 0; i < 2; i++) any = any || decode_tasks[i];
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -663,7 +744,9 @@ void live_stop() {
     if (decode_tasks[i]) { vTaskDelete(decode_tasks[i]); decode_tasks[i] = NULL; }
   }
   if (push_task) { vTaskDelete(push_task); push_task = NULL; }
+  if (audio_task) { vTaskDelete(audio_task); audio_task = NULL; }
   if (udp_task) { vTaskDelete(udp_task); udp_task = NULL; }
   for (int i = 0; i < N_VIDEO_CONNS; i++) live_video_streams[i] = NULL;
+  live_audio_stream = NULL;
   audio_stream_end();
 }

@@ -219,5 +219,6 @@ void setup() {
 void loop() {
   ui_process();
   bsp_lvgl_task();
+  live_ui_heartbeat();
   delay(1);  // lv_timer_handler 节奏：直播帧渲染密集，5ms 会造成帧瓶颈
 }

@@ -176,6 +176,76 @@ async def live_video_band(request: Request, h: int = 240) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+@router.get("/api/demo_band")
+async def demo_video_band(request: Request, frames: int | None = None) -> StreamingResponse:
+    video = _svc(request).settings.data_dir / "demo_loop.mp4"
+    if not video.is_file():
+        raise HTTPException(status_code=404, detail="demo video not found")
+
+    async def gen() -> AsyncIterator[bytes]:
+        proc = await asyncio.create_subprocess_exec(
+            resolve_binary("ffmpeg"), "-loglevel", "error",
+            "-stream_loop", "-1", "-re", "-i", str(video),
+            "-vf", "fps=12,scale=480:360,crop=480:200",
+            "-an", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "6", "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            sent = 0
+            while frames is None or sent < frames:
+                frame = await proc.stdout.readuntil(b"\xff\xd9")
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                sent += 1
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            pass
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.get("/api/demo_audio")
+async def demo_audio(request: Request, chunks: int | None = None) -> StreamingResponse:
+    video = _svc(request).settings.data_dir / "demo_loop.mp4"
+    if not video.is_file():
+        raise HTTPException(status_code=404, detail="demo video not found")
+
+    async def gen() -> AsyncIterator[bytes]:
+        proc = await asyncio.create_subprocess_exec(
+            resolve_binary("ffmpeg"), "-loglevel", "error",
+            "-stream_loop", "-1", "-re", "-i", str(video),
+            "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            sent = 0
+            while chunks is None or sent < chunks:
+                try:
+                    pcm = await proc.stdout.readexactly(640)
+                except asyncio.IncompleteReadError:
+                    break
+                yield pcm
+                sent += 1
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+
+    return StreamingResponse(gen(), media_type="application/octet-stream")
+
+
 @router.get("/api/live_udp")
 async def live_udp_register(request: Request, port: int = 5060, h: int = 200) -> dict:
     """UDP 直播注册：桌面屏调用后，服务端把直播带帧以 UDP 推送到 <调用者IP>:port。

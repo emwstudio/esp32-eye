@@ -10,3 +10,8 @@
 
 // NTP 服务器（可选覆盖）
 #define NTP_SERVER "pool.ntp.org"
+
+// 拍摄演示：固定计数并循环播放服务端视频；0 = 真实监控
+#define DEMO_MODE 0
+#define DEMO_VIDEO_PATH "/api/demo_band"
+#define DEMO_AUDIO_PATH "/api/demo_audio"

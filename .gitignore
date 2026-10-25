@@ -3,3 +3,5 @@ __pycache__/
 .env
 server/.venv/
 server/data/clips/
+server/data/demo_loop.mp4
+.DS_Store
