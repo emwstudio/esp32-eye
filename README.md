@@ -48,9 +48,9 @@
 
 | 模块 | 型号 | 用途 |
 |---|---|---|
-| 摄像头板 | Waveshare ESP32-S3-CAM-OV5640 | 碗沿视频与音频采集 |
+| 摄像头板 | [Waveshare ESP32-S3-CAM-OV5640](https://www.waveshare.com/esp32-s3-cam-ov5640.htm?&aff_id=187437) | 碗沿视频与音频采集 |
 | 摄像头 | OV5640 | 1024×768 JPEG 画面 |
-| 桌面屏 | Waveshare ESP32-S3-Touch-AMOLED-2.16 | 480×480 AMOLED 仪表盘 |
+| 桌面屏 | [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=187437) | 480×480 AMOLED 仪表盘 |
 | 电脑 | Apple Silicon MacBook | 视频接入、检测、识别、存储和推流 |
 
 ## 检测与识别逻辑
